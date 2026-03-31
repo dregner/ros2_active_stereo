@@ -16,10 +16,6 @@ GrayCode::GrayCode(cv::Size resolution, int axis, int px_f)
     // create_graycode_images();
 }
 
-std::vector<cv::Mat> GrayCode::get_gc_images() const {
-    return gc_images;
-}
-
 void GrayCode::show_gc_image() const {
     for (size_t i = 0; i < gc_images.size(); ++i) {
         std::cout << i << std::endl;
@@ -43,7 +39,7 @@ std::vector<std::string> GrayCode::list_to_graycode_binary(const std::vector<int
 }
 
 void GrayCode::create_graycode_image() {
-gc_images[0].setTo(255); 
+    gc_images[0].setTo(255); 
     gc_images[1].setTo(0); 
 
     std::vector<int> width_list;
@@ -98,7 +94,7 @@ std::vector<int> GrayCode::get_gc_order_v() const {
     return unique_vals;
 }
 
-std::vector<cv::Mat> GrayCode::get_color_gc_image(const std::string& color) const {
+std::vector<cv::Mat> GrayCode::get_gc_images(const std::string& color) const {
     std::vector<cv::Mat> colored_images(gc_images.size());
     cv::Mat zero_channel = cv::Mat::zeros(height, width, CV_8UC1);
 

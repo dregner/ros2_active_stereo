@@ -13,10 +13,6 @@ FringePattern::FringePattern(cv::Size resolution, int px_f, int steps)
     // create_fringe_image();
 }
 
-int FringePattern::get_steps() const { 
-    return steps; 
-}
-
 void FringePattern::show_fr_image() const {
     for (size_t i = 0; i < fr_images.size(); ++i) {
         cv::imshow("Image", fr_images[i]);
@@ -57,11 +53,8 @@ void FringePattern::create_fringe_image() {
     }
 }
 
-std::vector<cv::Mat> FringePattern::get_fr_images() const {
-    return fr_images;
-}
 
-std::vector<cv::Mat> FringePattern::get_color_fr_image(const std::string& color) const {
+std::vector<cv::Mat> FringePattern::get_fr_images(const std::string& color) const {
     std::vector<cv::Mat> colored_images(steps);
     cv::Mat zero_channel = cv::Mat::zeros(height, width, CV_8UC1);
 

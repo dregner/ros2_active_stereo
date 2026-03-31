@@ -5,10 +5,10 @@
 #include <rclcpp_components/register_node_macro.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/msg/image.hpp>
-#include "std_msgs/msg/int8.hpp"
+#include <std_msgs/msg/int8.hpp>
 #include <opencv2/opencv.hpp>
 #include <std_srvs/srv/set_bool.hpp>
-
+#include <std_srvs/srv/trigger.hpp>
 #include <FringePattern.hpp>
 #include <GrayCode.hpp>
 #include <monitor_utils.hpp>
@@ -20,11 +20,13 @@ public:
     ~ImageProjectNode() override;
 
 private:
-    void get_screen_resolution(const std::string& monitor_name);
+    bool get_screen_resolution(const std::string& monitor_name);
     void project_cb(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                          const std::shared_ptr<std_srvs::srv::SetBool::Response> response);
     void construct_window();
     void project_image_timer_cb();
+    void trigger_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                    const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
     std::unique_ptr<FringePattern> fringe_ptr_;
     std::unique_ptr<GrayCode> graycode_ptr_;
@@ -44,6 +46,17 @@ private:
     cv::Mat black_img_;
 
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr change_image_service_;
+    rclcpp::CallbackGroup::SharedPtr timer_cb_group_;
     rclcpp::TimerBase::SharedPtr timer_;
-};
+    rclcpp::Publisher<std_msgs::msg::Int8>::SharedPtr n_imgs_pub_;
+    rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr idx_proj_sub_;
+
+
+    // For debug only
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr left_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr right_pub_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trigger_service_;
+
+
+}; 
 #endif // ImageProjectNode_HPP
