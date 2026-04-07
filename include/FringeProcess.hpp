@@ -22,6 +22,10 @@ public:
 
     cv::Mat remap_qsi_image(const cv::Mat& qsi_image, const std::vector<int>& real_qsi_order);
 
+    void set_camera_resolution(cv::Size cam_res) {
+        cam_width = cam_res.width;
+        cam_height = cam_res.height;
+    };
 
     int get_total_steps();
     // Retorna {abs_phi_l, abs_phi_r, mod_l, mod_r}
@@ -31,6 +35,7 @@ private:
     int n_bits;
     int cam_width, cam_height;
     int total_steps;
+
     
     // Armazenamento das capturas
     std::vector<cv::Mat> images_left;

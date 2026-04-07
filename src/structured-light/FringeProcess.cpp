@@ -5,7 +5,7 @@ FringeProcess::FringeProcess(cv::Size img_res, cv::Size cam_res, int px_f, int s
     : FringePattern(img_res, px_f, steps), GrayCode(img_res, 0, px_f),
       cam_width(cam_res.width), cam_height(cam_res.height) {
 
-    n_bits = get_gc_images().size(); // n_bits + 2
+    n_bits = get_gc_images("gray").size(); // n_bits + 2
     total_steps = steps + n_bits;
 
     images_left.resize(total_steps);

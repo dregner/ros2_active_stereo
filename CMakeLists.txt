@@ -81,11 +81,33 @@ ament_target_dependencies(stereo_acquisition_comp
 # Registra a biblioteca como um plugin dinâmico do ROS 2
 rclcpp_components_register_nodes(stereo_acquisition_comp "StereoAcquisitionNode")
 
-
 # Cria o Executável Standalone (Para testes com ros2 run)
 add_executable(stereo_acquisition_node src/stereo_acquisition_node.cpp)
 target_link_libraries(stereo_acquisition_node stereo_acquisition_comp)
 ament_target_dependencies(stereo_acquisition_node rclcpp)
+# ==============================================================================
+# FRINGE PROCESS NODE (Stereo Process)
+# ==============================================================================
+
+# Cria a Biblioteca Compartilhada (O Componente / Plugin)
+add_library(stereo_process_comp SHARED
+  src/stereo_process.cpp
+  src/structured-light/FringeProcess.cpp
+  src/structured-light/FringePattern.cpp
+  src/structured-light/GrayCode.cpp
+  src/monitor_utils.cpp
+)
+
+target_include_directories(stereo_process_comp PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(stereo_process_comp
+  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge OpenCV
+)
+# Registra a biblioteca como um plugin dinâmico do ROS 2
+rclcpp_components_register_nodes(stereo_process_comp "StereoProcessNode")
+
 
 
 # ==============================================================================
@@ -98,6 +120,7 @@ install(TARGETS
       image_project_node
       stereo_acquisition_comp
       stereo_acquisition_node
+      stereo_process_comp
       ARCHIVE DESTINATION lib
       LIBRARY DESTINATION lib
       RUNTIME DESTINATION lib/${PROJECT_NAME}
