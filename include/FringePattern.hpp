@@ -16,8 +16,8 @@ public:
     int get_steps() const { return steps; };
     double get_n_fringes() const { return n_fringes; };
     
-    void set_steps(int s) { this->steps = s; };
-    void set_px_f(int pixel_f) { this->px_f = pixel_f; };
+    void set_steps(int s);
+    void set_px_f(int pixel_f);
     void set_resolution(cv::Size res) { this->width = res.width; this->height = res.height; };
 
 private:

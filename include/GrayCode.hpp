@@ -13,7 +13,7 @@ public:
     std::vector<std::string> list_to_graycode_binary(const std::vector<int>& int_list, int bit_length) const;
     
     void set_axis(int a) { this->axis = a; };
-    void set_px_f(int pixel_f) { this->px_f = pixel_f; };
+    void set_px_f(int pixel_f);
     void set_resolution(cv::Size res) { this->width = res.width; this->height = res.height; };
 
     int get_n_bits() const { return n_bits; };

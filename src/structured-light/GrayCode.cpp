@@ -115,3 +115,15 @@ std::vector<cv::Mat> GrayCode::get_gc_images(const std::string& color) const {
     }
     return colored_images;
 }
+
+void GrayCode::set_px_f(int pixel_f){
+    px_f = pixel_f;
+
+    gc_images.clear();
+    n_bits = static_cast<int>(std::ceil(std::log2(static_cast<double>(width) / px_f) + 1.0));
+    gc_images.resize(n_bits+2);
+
+    for (int i = 0; i < n_bits+2; ++i) {
+        gc_images[i] = cv::Mat::zeros(height, width, CV_8UC1);
+    }
+}

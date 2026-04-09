@@ -13,6 +13,22 @@ FringePattern::FringePattern(cv::Size resolution, int px_f, int steps)
     // create_fringe_image();
 }
 
+void FringePattern::set_steps(int s){
+    steps = s;
+    fr_images.clear();
+    fr_images.resize(steps);
+    
+    for (int i = 0; i < steps; ++i) {
+        fr_images[i] = cv::Mat::zeros(height, width, CV_8UC1);
+    }
+}
+
+void FringePattern::set_px_f(int pixel_f){
+    px_f = pixel_f;
+    n_fringes = std::floor(static_cast<double>(width) / px_f);
+
+}
+
 void FringePattern::show_fr_image() const {
     for (size_t i = 0; i < fr_images.size(); ++i) {
         cv::imshow("Image", fr_images[i]);
