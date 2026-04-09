@@ -15,6 +15,7 @@
 #include <FringeProcess.hpp>
 #include <opencv2/opencv.hpp>
 #include <monitor_utils.hpp>
+#include <chrono>
 
 
 class StereoProcessNode : public rclcpp::Node {
@@ -31,7 +32,7 @@ private:
                     const std::shared_ptr<std_srvs::srv::SetBool::Response> response);
 
     void send_trigger();
-    void _trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+    void _trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future);
     void stereo_callback( const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                           const sensor_msgs::msg::Image::ConstSharedPtr& right_msg);
     
@@ -39,8 +40,7 @@ private:
                     const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void construct_window();
     void project_image_timer_cb();
-    void trigger_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-                    const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
 
     std::unique_ptr<FringeProcess> fringe_process_ptr_;
 
@@ -48,12 +48,15 @@ private:
     int pixel_per_fringe;
     int fringe_steps;
     double timer_hz_;
+
     std::string color_;
 
     int n_proj_{0};
+    int trigger_timer_{0};
     cv::Size project_resolution_;
 
     bool project_imgs_{false};
+    bool process_{false};
     bool receive_camera_info_{false};
 
     std::string window_name_{"fringe"};

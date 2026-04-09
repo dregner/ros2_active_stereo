@@ -1,4 +1,5 @@
 #include <stereo_process.hpp>
+#include <chrono>
 
 
 StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
@@ -9,12 +10,12 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     this->declare_parameter("pixel_per_frigne", 128);
     this->declare_parameter("fringe_steps", 4);
     this->declare_parameter("image_color", "blue");
-    this->declare_parameter("camera_hz", 30);
+    this->declare_parameter("camera_hz", 20);
 
     pixel_per_fringe = this->get_parameter("pixel_per_frigne").as_int();
     fringe_steps = this->get_parameter("fringe_steps").as_int();
     color_ = this->get_parameter("image_color").as_string();
-    timer_hz_ =1 /  this->get_parameter("camera_hz").as_double() * 1000;
+    timer_hz_ = 1 /  this->get_parameter("camera_hz").as_int() * 1000;
     // Get Monitor data
     if (!get_screen_resolution(this->get_parameter("monitor_name").as_string())) {
         RCLCPP_ERROR(this->get_logger(), "Failed to get screen resolution");
@@ -58,11 +59,7 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>("trigger", rmw_qos_profile_default, srv_cb_group_);
 
     // O timer também entra no grupo para não bloquear o nó
-    timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(timer_hz_), 
-        std::bind(&StereoProcessNode::project_image_timer_cb, this),
-        timer_cb_group_
-    );
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<long>(timer_hz_)), std::bind(&StereoProcessNode::project_image_timer_cb, this), timer_cb_group_ );
 
 
 }
@@ -76,6 +73,7 @@ void StereoProcessNode::process_srv_cb(const std::shared_ptr<std_srvs::srv::Trig
     RCLCPP_INFO(this->get_logger(), "Initate acquisition...");
     n_proj_ = 0; // Garante que a projeção comece do início
     project_imgs_ = true; // Ativa a projeção
+    process_ = true;
     // Depois de processar, você pode publicar os resultados ou fazer o que for necessário
     response->message = "Initated process";
     response->success = true;
@@ -144,15 +142,23 @@ void StereoProcessNode::project_image_timer_cb(){
         fringe_process_ptr_->create_graycode_image();
 
         std::vector<cv::Mat> fr_imgs_ = fringe_process_ptr_->get_fr_images(color_);
+        all_imgs_.clear();
         all_imgs_ = fringe_process_ptr_->get_gc_images(color_);
         all_imgs_.insert(all_imgs_.end(), fr_imgs_.begin(), fr_imgs_.end());
+
+        
         
     }
-
     if (static_cast<size_t>(n_proj_) < all_imgs_.size() && project_imgs_){
         cv::imshow(window_name_, all_imgs_[n_proj_]);
-    }else{
-        cv::imshow(window_name_, black_img_);
+    }else{ cv::imshow(window_name_, black_img_);  }
+
+    if(process_){
+        if (trigger_timer_ > 10){
+                RCLCPP_WARN(this->get_logger(), "Request Trigger");
+                send_trigger();
+                trigger_timer_ = 0;
+            }else{ trigger_timer_++; }
     }
 
     cv::waitKey(10);
@@ -191,10 +197,12 @@ void StereoProcessNode::project_cb(const std::shared_ptr<std_srvs::srv::SetBool:
     response->success = true;
 }
 
-void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg) {
+void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg)
+{
     if(receive_camera_info_) return; // Evita processar múltiplas vezes
     cv::Size cam_res(msg->width, msg->height);
     fringe_process_ptr_->set_camera_resolution(cam_res);
+    RCLCPP_INFO(this->get_logger(), "Received camera info");    
     receive_camera_info_ = true;
 }
 
@@ -210,7 +218,7 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
     }
 
     // 2. Fluxo de Captura de Padrões
-    if (project_imgs_) {
+    if (process_) {
         try {
             // Converte imagens usando toCvShare (mais eficiente, sem cópia)
             cv::Mat left = cv_bridge::toCvShare(left_msg, "bgr8")->image;
@@ -223,9 +231,10 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
             fringe_process_ptr_->set_images(left, right, n_proj_);
             
             n_proj_++; // Avança o contador
-
+            trigger_timer_ = 0;
             // 3. Checa se terminamos a sequência
             if (n_proj_ >= static_cast<int>(all_imgs_.size())) {
+                process_ = false;
                 project_imgs_ = false;
                 n_proj_ = 0; // Reseta para a próxima rodada completa
                 
@@ -250,7 +259,8 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
 }
 
 // Função auxiliar para evitar repetição de código
-void StereoProcessNode::send_trigger() {
+void StereoProcessNode::send_trigger()
+{
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     trigger_client_->async_send_request(
         request,
