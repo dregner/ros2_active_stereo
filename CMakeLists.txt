@@ -103,7 +103,7 @@ target_include_directories(stereo_process_comp PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(stereo_process_comp
-  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge OpenCV
+  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport OpenCV
 )
 # Registra a biblioteca como um plugin dinâmico do ROS 2
 rclcpp_components_register_nodes(stereo_process_comp "StereoProcessNode")

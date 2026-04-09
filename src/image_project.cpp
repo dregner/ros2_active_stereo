@@ -4,7 +4,6 @@
 ImageProjectNode::ImageProjectNode(const rclcpp::NodeOptions & options)
 : Node("image_project_node", options), n_proj_(0), project_imgs_(false)
 {
-
     this->declare_parameter("monitor_name", "Monitor_1");
     this->declare_parameter("pixel_per_frigne", 128);
     this->declare_parameter("fringe_steps", 4);

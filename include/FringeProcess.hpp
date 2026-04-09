@@ -3,14 +3,18 @@
 
 #include "FringePattern.hpp"
 #include "GrayCode.hpp"
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <math.h>
 #include <set>
+
 class FringeProcess : public FringePattern, public GrayCode {
 public:
     FringeProcess(cv::Size img_res = cv::Size(1920, 1080), 
-                  cv::Size cam_res = cv::Size(1600, 1200), 
+                  cv::Size cam_res = cv::Size(2448, 2048), 
                   int px_f = 12, int steps = 12);
 
     void set_images(const cv::Mat& left, const cv::Mat& right, int counter);
@@ -22,12 +26,10 @@ public:
 
     cv::Mat remap_qsi_image(const cv::Mat& qsi_image, const std::vector<int>& real_qsi_order);
 
-    void set_camera_resolution(cv::Size cam_res) {
-        cam_width = cam_res.width;
-        cam_height = cam_res.height;
-    };
-
+    void set_camera_resolution(cv::Size cam_resolution);
     int get_total_steps();
+
+    bool save_images(std::string path);
     // Retorna {abs_phi_l, abs_phi_r, mod_l, mod_r}
     std::vector<cv::Mat> calculate_abs_phi_images();
 

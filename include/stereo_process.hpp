@@ -4,6 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <cv_bridge/cv_bridge.h>
+#include <image_transport/image_transport.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <message_filters/subscriber.h>
@@ -41,7 +42,6 @@ private:
     void construct_window();
     void project_image_timer_cb();
 
-
     std::unique_ptr<FringeProcess> fringe_process_ptr_;
 
     // Parameters variables
@@ -58,6 +58,7 @@ private:
     bool project_imgs_{false};
     bool process_{false};
     bool receive_camera_info_{false};
+    bool save_images_{false};
 
     std::string window_name_{"fringe"};
     std::pair<int, int> window_position_;
@@ -80,9 +81,5 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr process_service_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr trigger_client_;
     rclcpp::TimerBase::SharedPtr timer_;
-
-
-
-
 }; 
 #endif // StereoProcessNode_HPP

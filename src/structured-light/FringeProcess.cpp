@@ -16,6 +16,33 @@ FringeProcess::FringeProcess(cv::Size img_res, cv::Size cam_res, int px_f, int s
         images_right[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
     }
 }
+
+bool FringeProcess::save_images(std::string path){
+    try {
+        // Cria os diretórios recursivamente como um mkdir -p
+        std::filesystem::create_directories(path + "/left");
+        std::filesystem::create_directories(path + "/right");
+    } catch (const std::filesystem::filesystem_error& e) {
+        return false;
+    }
+
+    for (size_t i = 0; i < images_left.size(); ++i) {
+        // Formata o contador com preenchimento de zeros (000, 001, etc)
+        std::stringstream ss;
+        ss << std::setw(3) << std::setfill('0') << i;
+        std::string img_counter = ss.str();
+
+        std::string path_L = path + "/left/L" + img_counter + ".png";
+        std::string path_R = path + "/right/R" + img_counter + ".png";
+
+        // Salva as matrizes OpenCV e valida o sucesso da gravação
+        if (!cv::imwrite(path_L, images_left[i]) || !cv::imwrite(path_R, images_right[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 int FringeProcess::get_total_steps(){
     return total_steps;
 }
@@ -25,6 +52,23 @@ void FringeProcess::set_images(const cv::Mat& left, const cv::Mat& right, int co
         left.copyTo(images_left[counter]);
         right.copyTo(images_right[counter]);
     }
+}
+
+void FringeProcess::set_camera_resolution(cv::Size cam_resolution){
+    cam_width = cam_resolution.width;
+    cam_height = cam_resolution.height;
+    int steps = get_steps();
+    total_steps = steps + n_bits;
+    images_left.clear();
+    images_right.clear();
+    images_left.resize(total_steps);
+    images_right.resize(total_steps);
+
+    for (int i = 0; i < total_steps; ++i) {
+        images_left[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
+        images_right[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
+    }
+
 }
 
 std::pair<cv::Mat, cv::Mat> FringeProcess::calculate_phi(const std::vector<cv::Mat>& images) {

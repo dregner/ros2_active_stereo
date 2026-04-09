@@ -5,12 +5,12 @@
 StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
 : Node("image_project_node", options), n_proj_(0), project_imgs_(false)
 {
-
     this->declare_parameter("monitor_name", "Monitor_1");
     this->declare_parameter("pixel_per_frigne", 128);
     this->declare_parameter("fringe_steps", 4);
     this->declare_parameter("image_color", "blue");
     this->declare_parameter("camera_hz", 20);
+    this->declare_parameter("save_path", "/tmp/structured-light");
 
     pixel_per_fringe = this->get_parameter("pixel_per_frigne").as_int();
     fringe_steps = this->get_parameter("fringe_steps").as_int();
@@ -39,26 +39,23 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     srv_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
 
-
+    //Subscrbers
     auto qos = rclcpp::SensorDataQoS();
     rclcpp::SubscriptionOptions sub_options;    
 
     sub_left_.subscribe(this, "left/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sub_right_.subscribe(this, "right/image_raw", qos.get_rmw_qos_profile(), sub_options);
-
     sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), sub_left_, sub_right_);
     sync_->registerCallback(std::bind(&StereoProcessNode::stereo_callback, this, std::placeholders::_1, std::placeholders::_2));
-         // Subscribers for stereo images and camera info
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoProcessNode::camera_info_cb, this, std::placeholders::_1));
 
-        
-    change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoProcessNode::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
-   
-    process_service_ = this->create_service<std_srvs::srv::Trigger>("process", std::bind(&StereoProcessNode::process_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
 
+    // Services
+    change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoProcessNode::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
+    process_service_ = this->create_service<std_srvs::srv::Trigger>("process", std::bind(&StereoProcessNode::process_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>("trigger", rmw_qos_profile_default, srv_cb_group_);
 
-    // O timer também entra no grupo para não bloquear o nó
+    // Timer callback for projection
     timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<long>(timer_hz_)), std::bind(&StereoProcessNode::project_image_timer_cb, this), timer_cb_group_ );
 
 
@@ -124,6 +121,14 @@ void StereoProcessNode::project_image_timer_cb(){
     int steps = this->get_parameter("fringe_steps").as_int();
     color_ = this->get_parameter("image_color").as_string();
 
+    // 1. Verificação de Segurança (Câmera Info)
+    if (!receive_camera_info_) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+                             "Waiting for camera info. Sending trigger...");
+        send_trigger(); // Encapsulado para limpar o código
+        return;
+    }
+
     if(px_f != pixel_per_fringe || steps != fringe_steps){
         if (project_imgs_) {
             RCLCPP_WARN(this->get_logger(), "Projection parameters changed during active projection. Aborting current projection.");
@@ -161,6 +166,13 @@ void StereoProcessNode::project_image_timer_cb(){
             }else{ trigger_timer_++; }
     }
 
+    if(save_images_){
+        if(fringe_process_ptr_->save_images(this->get_parameter("save_path").as_string())){
+            save_images_ = false;
+            RCLCPP_INFO(this->get_logger(), "Save images on %s", this->get_parameter("save_path").as_string());
+        }else{ RCLCPP_ERROR(this->get_logger(), "Failed to save images");}
+    }
+
     cv::waitKey(10);
 
 }
@@ -169,6 +181,7 @@ void StereoProcessNode::project_image_timer_cb(){
 void StereoProcessNode::project_cb(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                          const std::shared_ptr<std_srvs::srv::SetBool::Response> response)
 {
+    
     if (request->data) {
         if (!project_imgs_) {
             // Primeiro chamado: inicia a sequência na imagem zero
@@ -201,6 +214,7 @@ void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::Const
 {
     if(receive_camera_info_) return; // Evita processar múltiplas vezes
     cv::Size cam_res(msg->width, msg->height);
+    RCLCPP_INFO(this->get_logger(), "Camera size: %d, %d", msg->width, msg->height);
     fringe_process_ptr_->set_camera_resolution(cam_res);
     RCLCPP_INFO(this->get_logger(), "Received camera info");    
     receive_camera_info_ = true;
@@ -209,20 +223,14 @@ void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::Const
 void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                                         const sensor_msgs::msg::Image::ConstSharedPtr& right_msg) 
 {
-    // 1. Verificação de Segurança (Câmera Info)
-    if (!receive_camera_info_) {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-                             "Waiting for camera info. Sending trigger...");
-        send_trigger(); // Encapsulado para limpar o código
-        return;
-    }
+
 
     // 2. Fluxo de Captura de Padrões
     if (process_) {
         try {
             // Converte imagens usando toCvShare (mais eficiente, sem cópia)
-            cv::Mat left = cv_bridge::toCvShare(left_msg, "bgr8")->image;
-            cv::Mat right = cv_bridge::toCvShare(right_msg, "bgr8")->image;
+            cv::Mat left = cv_bridge::toCvShare(left_msg, "mono8")->image;
+            cv::Mat right = cv_bridge::toCvShare(right_msg, "mono8")->image;
 
             RCLCPP_INFO(this->get_logger(), "Processing pattern %d / %zu", 
                         n_proj_ + 1, all_imgs_.size());
@@ -239,10 +247,7 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
                 n_proj_ = 0; // Reseta para a próxima rodada completa
                 
                 RCLCPP_INFO(this->get_logger(), "Sequence complete! Starting phase calculation...");
-                
-                // Aqui você dispara o processamento pesado
-                // Sugestão: dispare isso em uma thread separada se demorar muito para não travar o executor
-                // auto [abs_phi_l, abs_phi_r, mod_l, mod_r] = fringe_process_ptr_->calculate_abs_phi_images();
+                save_images_ = true;
             } 
             else {
                 // Ainda faltam padrões, pede o próximo para o projetor/câmera
@@ -288,4 +293,5 @@ void StereoProcessNode::_trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>
         RCLCPP_ERROR(this->get_logger(), "Exceção ao receber resposta do serviço: %s", e.what());
     }
 }
+
 RCLCPP_COMPONENTS_REGISTER_NODE(StereoProcessNode)
