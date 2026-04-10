@@ -57,8 +57,10 @@ private:
 
     bool project_imgs_{false};
     bool process_{false};
-    bool receive_camera_info_{false};
+    std::atomic<bool> receive_camera_info_{false};
     bool save_images_{false};
+    std::atomic<bool> receive_imgs_{false};
+    int skip_frames_{0};
 
     std::string window_name_{"fringe"};
     std::pair<int, int> window_position_;

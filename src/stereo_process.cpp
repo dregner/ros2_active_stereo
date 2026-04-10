@@ -6,16 +6,17 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
 : Node("image_project_node", options), n_proj_(0), project_imgs_(false)
 {
     this->declare_parameter("monitor_name", "Monitor_1");
-    this->declare_parameter("pixel_per_frigne", 128);
+    this->declare_parameter("pixel_per_fringe", 128);
     this->declare_parameter("fringe_steps", 4);
     this->declare_parameter("image_color", "blue");
     this->declare_parameter("camera_hz", 20);
+    this->declare_parameter("skip_trigger", 3);
     this->declare_parameter("save_path", "/tmp/structured-light");
 
-    pixel_per_fringe = this->get_parameter("pixel_per_frigne").as_int();
+    pixel_per_fringe = this->get_parameter("pixel_per_fringe").as_int();
     fringe_steps = this->get_parameter("fringe_steps").as_int();
     color_ = this->get_parameter("image_color").as_string();
-    timer_hz_ = 1 /  this->get_parameter("camera_hz").as_int() * 1000;
+    timer_hz_ = 1000 /  this->get_parameter("camera_hz").as_int();
     // Get Monitor data
     if (!get_screen_resolution(this->get_parameter("monitor_name").as_string())) {
         RCLCPP_ERROR(this->get_logger(), "Failed to get screen resolution");
@@ -30,8 +31,11 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     fringe_process_ptr_->create_fringe_image();
     fringe_process_ptr_->create_graycode_image(); // Construct images in grayscale by default
 
-    all_imgs_ = fringe_process_ptr_->get_gc_images(color_);
+    all_imgs_.clear();
+    all_imgs_.push_back(black_img_);
+    std::vector<cv::Mat> gc_imgs_ = fringe_process_ptr_->get_gc_images(color_);
     std::vector<cv::Mat> fr_imgs_ = fringe_process_ptr_->get_fr_images(color_); // Colors to print patterns (red, blue, green or null for grayscale)
+    all_imgs_.insert(all_imgs_.end(), gc_imgs_.begin(), gc_imgs_.end()); // GrayCode first, then Fringe Patterns
     all_imgs_.insert(all_imgs_.end(), fr_imgs_.begin(), fr_imgs_.end()); // GrayCode first, then Fringe Patterns
 
     // Callback group to avoid blocking the node with long operations (like cv::imshow)
@@ -45,7 +49,7 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
 
     sub_left_.subscribe(this, "left/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sub_right_.subscribe(this, "right/image_raw", qos.get_rmw_qos_profile(), sub_options);
-    sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(10), sub_left_, sub_right_);
+    sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(1), sub_left_, sub_right_);
     sync_->registerCallback(std::bind(&StereoProcessNode::stereo_callback, this, std::placeholders::_1, std::placeholders::_2));
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoProcessNode::camera_info_cb, this, std::placeholders::_1));
 
@@ -117,11 +121,11 @@ void StereoProcessNode::construct_window() {
 
 /* Timer callback for projecting images */
 void StereoProcessNode::project_image_timer_cb(){
-    int px_f = this->get_parameter("pixel_per_frigne").as_int();
+    int px_f = this->get_parameter("pixel_per_fringe").as_int();
     int steps = this->get_parameter("fringe_steps").as_int();
     color_ = this->get_parameter("image_color").as_string();
 
-    // 1. Verificação de Segurança (Câmera Info)
+    // Check if camera info msg has been received
     if (!receive_camera_info_) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
                              "Waiting for camera info. Sending trigger...");
@@ -129,6 +133,7 @@ void StereoProcessNode::project_image_timer_cb(){
         return;
     }
 
+    // Check if parameters have been changed
     if(px_f != pixel_per_fringe || steps != fringe_steps){
         if (project_imgs_) {
             RCLCPP_WARN(this->get_logger(), "Projection parameters changed during active projection. Aborting current projection.");
@@ -147,33 +152,52 @@ void StereoProcessNode::project_image_timer_cb(){
         fringe_process_ptr_->create_graycode_image();
 
         std::vector<cv::Mat> fr_imgs_ = fringe_process_ptr_->get_fr_images(color_);
+        std::vector<cv::Mat> gc_imgs_  = fringe_process_ptr_->get_gc_images(color_);
         all_imgs_.clear();
-        all_imgs_ = fringe_process_ptr_->get_gc_images(color_);
+        all_imgs_.push_back(black_img_);
+        all_imgs_.insert(all_imgs_.end(), gc_imgs_.begin(), gc_imgs_.end());
         all_imgs_.insert(all_imgs_.end(), fr_imgs_.begin(), fr_imgs_.end());
 
         
         
     }
-    if (static_cast<size_t>(n_proj_) < all_imgs_.size() && project_imgs_){
-        cv::imshow(window_name_, all_imgs_[n_proj_]);
-    }else{ cv::imshow(window_name_, black_img_);  }
 
-    if(process_){
-        if (trigger_timer_ > 10){
-                RCLCPP_WARN(this->get_logger(), "Request Trigger");
-                send_trigger();
-                trigger_timer_ = 0;
-            }else{ trigger_timer_++; }
+    // Check if can project and n_proj_ is below projection img number
+    if (static_cast<size_t>(n_proj_) < all_imgs_.size() && project_imgs_) {
+        cv::imshow(window_name_, all_imgs_[n_proj_]);
+        cv::waitKey(10);
+    } else { 
+        cv::imshow(window_name_, black_img_);
+        cv::waitKey(10);
     }
 
+    // 2. Send trigger if processing and do not receive
+    if (process_){
+        if(!receive_imgs_){ send_trigger();} 
+        else{ 
+            receive_imgs_ = false; 
+            skip_frames_ = this->get_parameter("skip_trigger").as_int(); 
+            n_proj_++;
+        }
+    }
+    
+    // For start in case trigger does not send both images
+    // if(process_ && !receive_imgs_ && n_proj_ == 0){
+    //     if (trigger_timer_ > 10){
+    //         RCLCPP_WARN(this->get_logger(), "Request Trigger");
+    //         send_trigger();
+    //         trigger_timer_ = 0;
+    //     }else{ trigger_timer_++; }
+    // }
+    
     if(save_images_){
         if(fringe_process_ptr_->save_images(this->get_parameter("save_path").as_string())){
             save_images_ = false;
-            RCLCPP_INFO(this->get_logger(), "Save images on %s", this->get_parameter("save_path").as_string());
+            RCLCPP_INFO(this->get_logger(), "Save images on %s", this->get_parameter("save_path").as_string().c_str());
         }else{ RCLCPP_ERROR(this->get_logger(), "Failed to save images");}
     }
 
-    cv::waitKey(10);
+    // cv::waitKey(10);
 
 }
 
@@ -226,33 +250,34 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
 
 
     // 2. Fluxo de Captura de Padrões
-    if (process_) {
+    if (process_ && !receive_imgs_) {
+        if (skip_frames_ > 0) {
+            skip_frames_--;
+            return;
+        }
         try {
             // Converte imagens usando toCvShare (mais eficiente, sem cópia)
             cv::Mat left = cv_bridge::toCvShare(left_msg, "mono8")->image;
             cv::Mat right = cv_bridge::toCvShare(right_msg, "mono8")->image;
 
             RCLCPP_INFO(this->get_logger(), "Processing pattern %d / %zu", 
-                        n_proj_ + 1, all_imgs_.size());
+                        n_proj_, all_imgs_.size());
 
             // Armazena no buffer do fringe_process
-            fringe_process_ptr_->set_images(left, right, n_proj_);
+            if (n_proj_ != 0){
+                fringe_process_ptr_->set_images(left, right, (n_proj_-1));
+            }
+            receive_imgs_ = true;
             
-            n_proj_++; // Avança o contador
             trigger_timer_ = 0;
-            // 3. Checa se terminamos a sequência
-            if (n_proj_ >= static_cast<int>(all_imgs_.size())) {
+
+            if (static_cast<size_t>(n_proj_) >= all_imgs_.size()) {
                 process_ = false;
                 project_imgs_ = false;
-                n_proj_ = 0; // Reseta para a próxima rodada completa
-                
-                RCLCPP_INFO(this->get_logger(), "Sequence complete! Starting phase calculation...");
                 save_images_ = true;
+                n_proj_ = 0;
+                RCLCPP_INFO(this->get_logger(), "Sequência completa! Iniciando salvamento...");
             } 
-            else {
-                // Ainda faltam padrões, pede o próximo para o projetor/câmera
-                send_trigger();
-            }
 
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
