@@ -53,6 +53,8 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     sync_->registerCallback(std::bind(&StereoProcessNode::stereo_callback, this, std::placeholders::_1, std::placeholders::_2));
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoProcessNode::camera_info_cb, this, std::placeholders::_1));
 
+    //Publisher
+    status_pub_ = this->create_publisher<ros2_stereo_active_msgs::msg::ActiveStatus>("status", 10);
 
     // Services
     change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoProcessNode::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
@@ -180,16 +182,7 @@ void StereoProcessNode::project_image_timer_cb(){
             n_proj_++;
         }
     }
-    
-    // For start in case trigger does not send both images
-    // if(process_ && !receive_imgs_ && n_proj_ == 0){
-    //     if (trigger_timer_ > 10){
-    //         RCLCPP_WARN(this->get_logger(), "Request Trigger");
-    //         send_trigger();
-    //         trigger_timer_ = 0;
-    //     }else{ trigger_timer_++; }
-    // }
-    
+      
     if(save_images_){
         if(fringe_process_ptr_->save_images(this->get_parameter("save_path").as_string())){
             save_images_ = false;
@@ -197,6 +190,13 @@ void StereoProcessNode::project_image_timer_cb(){
         }else{ RCLCPP_ERROR(this->get_logger(), "Failed to save images");}
     }
 
+    ros2_stereo_active_msgs::msg::ActiveStatus status_msg;
+    status_msg.header.stap = now();
+    status_msg.header.frame_id = "Active/left_camera_link";
+    status_msg.pixel_per_fringe = fringe_process_ptr_->FringePattern::get_px_f();
+    status_msg.steps = fringe_process_ptr_->FringePattern::get_steps();
+    status_msg.n_bits = fringe_process_ptr->GrayCode::get_n_bits();
+    status_pub_->publish(status_msg);
     // cv::waitKey(10);
 
 }

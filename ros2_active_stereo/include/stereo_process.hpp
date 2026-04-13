@@ -12,7 +12,7 @@
 #include <message_filters/sync_policies/exact_time.h>
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
-
+#include <ros2_stereo_active_msgs/msg/active_status.msgs.hpp>
 #include <FringeProcess.hpp>
 #include <opencv2/opencv.hpp>
 #include <monitor_utils.hpp>
@@ -71,11 +71,12 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> sub_left_;
     message_filters::Subscriber<sensor_msgs::msg::Image> sub_right_;
-
+    
     using SyncPolicy = message_filters::sync_policies::ExactTime<
-        sensor_msgs::msg::Image, sensor_msgs::msg::Image>;
+    sensor_msgs::msg::Image, sensor_msgs::msg::Image>;
     std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
-
+    
+    rclcpp::Publisher<ros2_stereo_active_msgs::msg::ActiveStatus>::SharedPtr status_pub_;
     rclcpp::CallbackGroup::SharedPtr timer_cb_group_;
     rclcpp::CallbackGroup::SharedPtr srv_cb_group_;
     

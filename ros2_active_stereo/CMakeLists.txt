@@ -17,7 +17,7 @@ find_package(std_srvs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
-
+find_package(ros2_active_stereo_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -103,7 +103,7 @@ target_include_directories(stereo_process_comp PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(stereo_process_comp
-  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport OpenCV
+  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport ros2_active_stereo_msgs OpenCV
 )
 # Registra a biblioteca como um plugin dinâmico do ROS 2
 rclcpp_components_register_nodes(stereo_process_comp "StereoProcessNode")

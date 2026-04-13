@@ -6,12 +6,12 @@ FringeProcess::FringeProcess(cv::Size img_res, cv::Size cam_res, int px_f, int s
       cam_width(cam_res.width), cam_height(cam_res.height) {
 
     n_bits = get_gc_images("gray").size(); // n_bits + 2
-    total_steps = steps + n_bits;
+    total_images = steps + n_bits;
 
-    images_left.resize(total_steps);
-    images_right.resize(total_steps);
+    images_left.resize(total_images);
+    images_right.resize(total_images);
 
-    for (int i = 0; i < total_steps; ++i) {
+    for (int i = 0; i < total_images; ++i) {
         images_left[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
         images_right[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
     }
@@ -43,12 +43,12 @@ bool FringeProcess::save_images(std::string path){
     return true;
 }
 
-int FringeProcess::get_total_steps(){
-    return total_steps;
+int FringeProcess::get_total_images(){
+    return total_images;
 }
 
 void FringeProcess::set_images(const cv::Mat& left, const cv::Mat& right, int counter) {
-    if (counter < total_steps) {
+    if (counter < total_images) {
         left.copyTo(images_left[counter]);
         right.copyTo(images_right[counter]);
     }
@@ -58,13 +58,14 @@ void FringeProcess::set_camera_resolution(cv::Size cam_resolution){
     cam_width = cam_resolution.width;
     cam_height = cam_resolution.height;
     int steps = get_steps();
-    total_steps = steps + n_bits;
+    n_bits = get_gc_images.size();
+    total_images = steps + n_bits;
     images_left.clear();
     images_right.clear();
-    images_left.resize(total_steps);
-    images_right.resize(total_steps);
+    images_left.resize(total_images);
+    images_right.resize(total_images);
 
-    for (int i = 0; i < total_steps; ++i) {
+    for (int i = 0; i < total_images; ++i) {
         images_left[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
         images_right[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
     }
