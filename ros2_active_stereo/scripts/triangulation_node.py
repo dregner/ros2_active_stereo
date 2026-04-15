@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 import numpy as np
-import cupy as cp
 import rclpy
 from rclpy.node import Node
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from std_msgs.msg import Header
-from std_srvs.srv import Empty
-from std_msgs.msg import String
+from std_srvs.srv import Trigger, Empty
 import struct
 import time
 import tf2_ros
@@ -17,7 +15,7 @@ from geometry_msgs.msg import TransformStamped
 from std_msgs.msg import Header
 import tf_transformations
 
-from ros2_active_stereo.ros2_active_stereo.scripts.SpatialCorrelation_pytorch import PyTorchStereoCorrel # pyright: ignore[reportMissingImports]
+from SpatialCorrelation_pytorch import PyTorchStereoCorrel
 import torch
 
 class TriangulationNode(Node):
@@ -27,109 +25,62 @@ class TriangulationNode(Node):
 
         self.bridge = CvBridge()
 
-        self.get_logger().info("Node 'triangulation_node' criado, esperando transições do ciclo de vida...")
-
-        self.state_pub = self.create_publisher(String, 'state_triangulation_node', 10)
-        self.current_state = 'UNCONFIGURED'
-        self.set_state(self.current_state)
-
-        # Timer que publica o estado a cada 1 segundo
-        self.state_timer = self.create_timer(0.5, self.publish_state_periodically)
-
+        self.get_logger().info("Node 'triangulation_node' criado")
         self.zscan = None
         # Construct variables in case disparity point cloud is not available
         self.zmin = -200
         self.zmax = 200
+      
 
-        # Configuring the node
-        self.on_configure()
+        # Subscribers de tópicos de imagem e camera_info
+        self.create_subscription(Image, 'abs_phi_left', lambda msg: self.image_callback(msg, 'sync/left/phase_map'), 10)
+        self.create_subscription(Image, 'abs_phi_right', lambda msg: self.image_callback(msg, 'sync/right/phase_map'), 10)
+        self.create_subscription(Image, 'mask_left', lambda msg: self.image_callback(msg, 'sync/left/modulation_map'), 10)
+        self.create_subscription(Image, 'mask_right', lambda msg: self.image_callback(msg, 'sync/right/modulation_map'), 10)
 
-    def set_state(self, state_name: str):
-        self.current_state = state_name
-        msg = String()
-        msg.data = state_name
-        self.state_pub.publish(msg)
-        self.get_logger().info(f"[Estado] {state_name}")
+        # Publisher de nuvem de pontos
+        self.pointcloud_publisher = self.create_publisher(PointCloud2, 'pointcloud', 10)
 
-    def publish_state_periodically(self):
-        msg = String()
-        msg.data = self.current_state
-        self.state_pub.publish(msg)
+        # Parameters
+        self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_fringe_projection/params/SM4.yaml')
+        self.declare_parameter('mod_thresh', 50) #cupy 0.07. torch (0-255)
+        self.declare_parameter('rad_tresh', 0.06) #threshold for radian difference
+        self.declare_parameter('debug_save_points', False)
+        self.declare_parameter('save_filename', 'fringe_points')
+        self.declare_parameter('camera_frame_id', '/Active/left_camera_link')
+        # KDTree parameters
+        self.declare_parameter('neighbours', 15)
+        self.declare_parameter('radius', 12)
 
-    def on_configure(self):
-        try: 
-            self.get_logger().info('triangulation_node is configuring...')
-            self.current_state = 'CONFIGURING'
-            self.set_state(self.current_state)
+        self.images = {
+        'abs_phi_left': None,
+        'abs_phi_right': None,
+        'mask_left': None,
+        'mask_right': None
+        }
 
-            # Subscribers de tópicos de imagem e camera_info
-            self.create_subscription(Image, 'abs_phi_left', lambda msg: self.image_callback(msg, 'abs_phi_left'), 10)
-            self.create_subscription(Image, 'abs_phi_right', lambda msg: self.image_callback(msg, 'abs_phi_right'), 10)
-            self.create_subscription(Image, 'mask_left', lambda msg: self.image_callback(msg, 'mask_left'), 10)
-            self.create_subscription(Image, 'mask_right', lambda msg: self.image_callback(msg, 'mask_right'), 10)
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-            # Publisher de nuvem de pontos
-            self.pointcloud_publisher = self.create_publisher(PointCloud2, 'pointcloud', 10)
+        # Services
+        self.process_phase = self.create_client(Empty, 'phase_process')
+        while not self.process_phase.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Service not available, waiting again ...')
 
-            # Parameters
-            self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_fringe_projection/params/SM4.yaml')
-            self.declare_parameter('mod_thresh', 50) #cupy 0.07. torch (0-255)
-            self.declare_parameter('rad_tresh', 0.06) #threshold for radian difference
-            self.declare_parameter('debug_save_points', False)
-            self.declare_parameter('save_filename', 'fringe_points')
-            self.declare_parameter('camera_frame_id', '/Active/left_camera_link')
-            # KDTree parameters
-            self.declare_parameter('neighbours', 15)
-            self.declare_parameter('radius', 12)
-
-            self.images = {
-            'abs_phi_left': None,
-            'abs_phi_right': None,
-            'mask_left': None,
-            'mask_right': None
-            }
-
-            self.tf_buffer = tf2_ros.Buffer()
-            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
-            # Services
-            self.process_phase = self.create_client(Empty, 'phase_process')
-            while not self.process_phase.wait_for_service(timeout_sec=1.0):
+        self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
+        self.phase_process = self.create_client(Trigger, 'phase_process')
+        while not self.phase_process.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info('Service not available, waiting again ...')
 
-            self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
 
-        except Exception as e:
-            self.get_logger().info(f'Error during configuration: {e}')
-            self.current_state = 'ERROR IN CONFIGURATION'
-            self.set_state(self.current_state)
+        self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, '/Passive/disparity/pointcloud', self.z_limits_global, 10)
 
-    def on_activate(self):
-        try:
-            self.get_logger().info('triangulation_node  is activating...')
-
-            self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, '/Passive/disparity/pointcloud', self.z_limits_global, 10)
-
-            self.images = {
-            'abs_phi_left': None,
-            'abs_phi_right': None,
-            'mask_left': None,
-            'mask_right': None
-            }
-            self.mod_thresh = self.get_parameter('mod_thresh').value
-            self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
-            filename = self.get_parameter('save_filename').get_parameter_value().string_value
-            # Torch class
-            self.zscan = PyTorchStereoCorrel(yaml_file=self.yaml_file)
-            self.get_logger().info('triangulation_node activated successfully.')
-
-        except Exception as e:
-            self.get_logger().info(f'Error during activation: {e}')
-            self.current_state = 'ERROR IN ACTIVATION'
-            self.set_state(self.current_state)
+        self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
+        # Torch class
+        self.zscan = PyTorchStereoCorrel(yaml_file=self.yaml_file)
 
     def _phase_process(self):
-        request = Empty.Request()
+        request = Trigger.Request()
         future = self.process_phase.call_async(request)
         future.add_done_callback(self._phase_callback)
     
@@ -323,18 +274,7 @@ class TriangulationNode(Node):
         transformed_xyz_cam = transformed_ph[:, :3] * 1000  # Convert from meters to millimeters
 
         # transformar os pontos para peça
-        # transformed_xyz = ((R_left.T @ transformed_xyz_cam.T) - T_left[:, None]).T
         transformed_xyz = ((R_left.T @ transformed_xyz_cam.T) - (R_left.T @ T_left[:, None])).T
-
-        # orientacao = R_left.T # matriz de rotação (3x3)
-        # translacao = R_left.T @ T_left # vetor de translação (3x1)
-
-        # matriz_homogenea = np.eye(4)
-        # matriz_homogenea[:3, :3] = orientacao
-        # matriz_homogenea[:3, 3] = translacao
-
-        # np.set_printoptions(precision=4, suppress=True)
-        # self.get_logger().info(f'\nmatriz homogenea:\n{matriz_homogenea}')
 
         xmin, xmax = -100, 500
         ymin, ymax = -100, 400
@@ -347,7 +287,6 @@ class TriangulationNode(Node):
         # Obtém os limites globais dos pontos
         self.zmin = np.min(filtered_points[:, 2])  # Consider only Z values
         self.zmax = np.max(filtered_points[:, 2])  # Consider only Z values
-        # self.get_logger().info(f'Z range: ({self.zmin:.2f}, {self.zmax:.2f})')
 
     def do_transform_matrix(self, msg):
         # Trnasforma as mensagens de PoseStamped e TransformStamped em uma matriz de transformação 4x4

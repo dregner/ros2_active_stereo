@@ -60,19 +60,19 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoProcessNode::camera_info_cb, this, std::placeholders::_1));
 
     //Publisher 64F images
-    pub_abs_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/absolute_image", 10);
-    pub_abs_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/absolute_image", 10);
-    pub_mod_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/modulation_image", 10);
-    pub_mod_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/modulation_image", 10);
+    pub_abs_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/phase_map", 10);
+    pub_abs_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/phase_map", 10);
+    pub_mod_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/modulation_map", 10);
+    pub_mod_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/modulation_map", 10);
     // Publihser debug images
-    pub_abs_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/absolute_image", 10);
-    pub_abs_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/absolute_image", 10);
-    pub_mod_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/modulation_image", 10);
-    pub_mod_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/modulation_image", 10);
+    pub_abs_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/phase_map", 10);
+    pub_abs_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/phase_map", 10);
+    pub_mod_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/modulation_map", 10);
+    pub_mod_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/modulation_map", 10);
 
     // Services
     change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoProcessNode::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
-    process_service_ = this->create_service<std_srvs::srv::Trigger>("process", std::bind(&StereoProcessNode::process_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
+    process_service_ = this->create_service<std_srvs::srv::Trigger>("phase_process", std::bind(&StereoProcessNode::process_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>("trigger", rmw_qos_profile_default, srv_cb_group_);
 
     // Timer callback for projection

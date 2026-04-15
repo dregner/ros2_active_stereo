@@ -111,9 +111,15 @@ install(DIRECTORY include/
   DESTINATION include
 )
 
+install(
+    PROGRAMS
+    scripts/triangulation_node.py
+    DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY
         launch
-        # config
+        config
         DESTINATION share/${PROJECT_NAME})
         
 
