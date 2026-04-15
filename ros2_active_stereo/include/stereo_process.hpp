@@ -12,7 +12,6 @@
 #include <message_filters/sync_policies/exact_time.h>
 #include <std_srvs/srv/set_bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
-#include <ros2_stereo_active_msgs/msg/active_status.msgs.hpp>
 #include <FringeProcess.hpp>
 #include <opencv2/opencv.hpp>
 #include <monitor_utils.hpp>
@@ -27,13 +26,18 @@ public:
 private:
     bool get_screen_resolution(const std::string& monitor_name);
 
+
     void camera_info_cb(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg);
     
     void project_cb(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                     const std::shared_ptr<std_srvs::srv::SetBool::Response> response);
 
+    void publish_processed_images(std::vector<cv::Mat> images);
+    void publish_processed_debug_images(std::vector<cv::Mat> images);
+
     void send_trigger();
-    void _trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future);
+    void trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future);
+    
     void stereo_callback( const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                           const sensor_msgs::msg::Image::ConstSharedPtr& right_msg);
     
@@ -58,7 +62,6 @@ private:
     bool project_imgs_{false};
     bool process_{false};
     std::atomic<bool> receive_camera_info_{false};
-    bool save_images_{false};
     std::atomic<bool> receive_imgs_{false};
     int skip_frames_{0};
 
@@ -66,8 +69,11 @@ private:
     std::pair<int, int> window_position_;
 
     std::vector<cv::Mat> all_imgs_;
+    std::vector<cv::Mat> process_result_;
     cv::Mat black_img_;
+    
 
+    // Raw stereo image subscribers
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> sub_left_;
     message_filters::Subscriber<sensor_msgs::msg::Image> sub_right_;
@@ -75,14 +81,29 @@ private:
     using SyncPolicy = message_filters::sync_policies::ExactTime<
     sensor_msgs::msg::Image, sensor_msgs::msg::Image>;
     std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
+
+    //64 float image publisher
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_abs_left_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_abs_right_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_mod_left_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_mod_right_;
+
+    //Debug processed image publisher
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_abs_left_debug_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_abs_right_debug_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_mod_left_debug_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_mod_right_debug_;
     
-    rclcpp::Publisher<ros2_stereo_active_msgs::msg::ActiveStatus>::SharedPtr status_pub_;
+    // Service callback groups;
     rclcpp::CallbackGroup::SharedPtr timer_cb_group_;
     rclcpp::CallbackGroup::SharedPtr srv_cb_group_;
     
+    // Service and clients
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr change_image_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr process_service_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr trigger_client_;
+
+    // Projection timer callback
     rclcpp::TimerBase::SharedPtr timer_;
 }; 
 #endif // StereoProcessNode_HPP

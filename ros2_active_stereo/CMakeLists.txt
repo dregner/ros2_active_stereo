@@ -63,28 +63,7 @@ add_executable(image_project_node src/image_project_node.cpp)
 target_link_libraries(image_project_node image_project_comp X11 Xinerama)
 ament_target_dependencies(image_project_node rclcpp)
 
-# ==============================================================================
-# NÓ 2: AQUISIÇÃO ESTÉREO (Stereo Acquisition)
-# ==============================================================================
 
-# Cria a Biblioteca Compartilhada (O Componente / Plugin)
-add_library(stereo_acquisition_comp SHARED
-  src/stereo_acquisition.cpp
-)
-target_include_directories(stereo_acquisition_comp PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-ament_target_dependencies(stereo_acquisition_comp
-  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge OpenCV
-)
-# Registra a biblioteca como um plugin dinâmico do ROS 2
-rclcpp_components_register_nodes(stereo_acquisition_comp "StereoAcquisitionNode")
-
-# Cria o Executável Standalone (Para testes com ros2 run)
-add_executable(stereo_acquisition_node src/stereo_acquisition_node.cpp)
-target_link_libraries(stereo_acquisition_node stereo_acquisition_comp)
-ament_target_dependencies(stereo_acquisition_node rclcpp)
 # ==============================================================================
 # FRINGE PROCESS NODE (Stereo Process)
 # ==============================================================================
@@ -108,7 +87,10 @@ ament_target_dependencies(stereo_process_comp
 # Registra a biblioteca como um plugin dinâmico do ROS 2
 rclcpp_components_register_nodes(stereo_process_comp "StereoProcessNode")
 
-
+# Cria o Executável Standalone (Para testes com ros2 run)
+add_executable(stereo_process_node src/stereo_process_node.cpp)
+target_link_libraries(stereo_process_node stereo_process_comp)
+ament_target_dependencies(stereo_process_node rclcpp)
 
 # ==============================================================================
 # REGRAS DE INSTALAÇÃO
@@ -118,9 +100,8 @@ rclcpp_components_register_nodes(stereo_process_comp "StereoProcessNode")
 install(TARGETS
       image_project_comp
       image_project_node
-      stereo_acquisition_comp
-      stereo_acquisition_node
       stereo_process_comp
+      stereo_process_node
       ARCHIVE DESTINATION lib
       LIBRARY DESTINATION lib
       RUNTIME DESTINATION lib/${PROJECT_NAME}

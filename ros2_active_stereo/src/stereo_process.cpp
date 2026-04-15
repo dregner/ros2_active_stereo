@@ -5,6 +5,7 @@
 StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
 : Node("image_project_node", options), n_proj_(0), project_imgs_(false)
 {
+    // Node params
     this->declare_parameter("monitor_name", "Monitor_1");
     this->declare_parameter("pixel_per_fringe", 128);
     this->declare_parameter("fringe_steps", 4);
@@ -12,11 +13,15 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     this->declare_parameter("camera_hz", 20);
     this->declare_parameter("skip_trigger", 3);
     this->declare_parameter("save_path", "/tmp/structured-light");
+    this->declare_parameter("save_image", false);
+    this->declare_parameter("debug", true);
 
+    // Structured light params to class
     pixel_per_fringe = this->get_parameter("pixel_per_fringe").as_int();
     fringe_steps = this->get_parameter("fringe_steps").as_int();
     color_ = this->get_parameter("image_color").as_string();
     timer_hz_ = 1000 /  this->get_parameter("camera_hz").as_int();
+
     // Get Monitor data
     if (!get_screen_resolution(this->get_parameter("monitor_name").as_string())) {
         RCLCPP_ERROR(this->get_logger(), "Failed to get screen resolution");
@@ -26,11 +31,11 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     construct_window();
 
     // Initiate Fringe and Gray Code generators
-    fringe_process_ptr_ = std::make_unique<FringeProcess>(cv::Size(2448,2048), project_resolution_, pixel_per_fringe, fringe_steps);
+    fringe_process_ptr_ = std::make_unique<FringeProcess>(project_resolution_, cv::Size(2448,2048), pixel_per_fringe, fringe_steps);
 
+    // create fringe and graycode images
     fringe_process_ptr_->create_fringe_image();
     fringe_process_ptr_->create_graycode_image(); // Construct images in grayscale by default
-
     all_imgs_.clear();
     all_imgs_.push_back(black_img_);
     std::vector<cv::Mat> gc_imgs_ = fringe_process_ptr_->get_gc_images(color_);
@@ -43,18 +48,27 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     srv_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
 
-    //Subscrbers
+    //Subscrbers Quality of Service
     auto qos = rclcpp::SensorDataQoS();
     rclcpp::SubscriptionOptions sub_options;    
 
+    // Subscribers
     sub_left_.subscribe(this, "left/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sub_right_.subscribe(this, "right/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(1), sub_left_, sub_right_);
     sync_->registerCallback(std::bind(&StereoProcessNode::stereo_callback, this, std::placeholders::_1, std::placeholders::_2));
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoProcessNode::camera_info_cb, this, std::placeholders::_1));
 
-    //Publisher
-    status_pub_ = this->create_publisher<ros2_stereo_active_msgs::msg::ActiveStatus>("status", 10);
+    //Publisher 64F images
+    pub_abs_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/absolute_image", 10);
+    pub_abs_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/absolute_image", 10);
+    pub_mod_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/modulation_image", 10);
+    pub_mod_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/modulation_image", 10);
+    // Publihser debug images
+    pub_abs_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/absolute_image", 10);
+    pub_abs_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/absolute_image", 10);
+    pub_mod_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/modulation_image", 10);
+    pub_mod_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/modulation_image", 10);
 
     // Services
     change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoProcessNode::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
@@ -71,6 +85,7 @@ StereoProcessNode::~StereoProcessNode() {
     cv::destroyWindow(window_name_);
 }
 
+// Process service callback
 void StereoProcessNode::process_srv_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     const std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
     RCLCPP_INFO(this->get_logger(), "Initate acquisition...");
@@ -82,7 +97,9 @@ void StereoProcessNode::process_srv_cb(const std::shared_ptr<std_srvs::srv::Trig
     response->success = true;
 }
 
-bool StereoProcessNode::get_screen_resolution(const std::string& monitor_name) {
+// Get Monitor resolution
+bool StereoProcessNode::get_screen_resolution(const std::string& monitor_name)
+{
     auto monitors = get_monitors();
 
         // 1. Imprime TODOS os monitores encontrados para debug
@@ -115,14 +132,17 @@ bool StereoProcessNode::get_screen_resolution(const std::string& monitor_name) {
     return false;
 }
 
-void StereoProcessNode::construct_window() {
+// Construct opencv projection window
+void StereoProcessNode::construct_window() 
+{
 
     cv::namedWindow(window_name_, cv::WINDOW_NORMAL);  // allow resizing
     cv::setWindowProperty(window_name_, cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);  
 }
 
 /* Timer callback for projecting images */
-void StereoProcessNode::project_image_timer_cb(){
+void StereoProcessNode::project_image_timer_cb()
+{
     int px_f = this->get_parameter("pixel_per_fringe").as_int();
     int steps = this->get_parameter("fringe_steps").as_int();
     color_ = this->get_parameter("image_color").as_string();
@@ -159,8 +179,7 @@ void StereoProcessNode::project_image_timer_cb(){
         all_imgs_.push_back(black_img_);
         all_imgs_.insert(all_imgs_.end(), gc_imgs_.begin(), gc_imgs_.end());
         all_imgs_.insert(all_imgs_.end(), fr_imgs_.begin(), fr_imgs_.end());
-
-        
+      
         
     }
 
@@ -183,22 +202,11 @@ void StereoProcessNode::project_image_timer_cb(){
         }
     }
       
-    if(save_images_){
+    if(this->get_parameter("save_image").as_bool()){
         if(fringe_process_ptr_->save_images(this->get_parameter("save_path").as_string())){
-            save_images_ = false;
             RCLCPP_INFO(this->get_logger(), "Save images on %s", this->get_parameter("save_path").as_string().c_str());
         }else{ RCLCPP_ERROR(this->get_logger(), "Failed to save images");}
     }
-
-    ros2_stereo_active_msgs::msg::ActiveStatus status_msg;
-    status_msg.header.stap = now();
-    status_msg.header.frame_id = "Active/left_camera_link";
-    status_msg.pixel_per_fringe = fringe_process_ptr_->FringePattern::get_px_f();
-    status_msg.steps = fringe_process_ptr_->FringePattern::get_steps();
-    status_msg.n_bits = fringe_process_ptr->GrayCode::get_n_bits();
-    status_pub_->publish(status_msg);
-    // cv::waitKey(10);
-
 }
 
 /*Bool Project service callback, False: reset, true: start process*/
@@ -234,6 +242,7 @@ void StereoProcessNode::project_cb(const std::shared_ptr<std_srvs::srv::SetBool:
     response->success = true;
 }
 
+// Left camera info callback
 void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg)
 {
     if(receive_camera_info_) return; // Evita processar múltiplas vezes
@@ -244,6 +253,7 @@ void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::Const
     receive_camera_info_ = true;
 }
 
+// Stereo message filter callback (exact time -> tirggered via hardware)
 void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                                         const sensor_msgs::msg::Image::ConstSharedPtr& right_msg) 
 {
@@ -274,9 +284,16 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
             if (static_cast<size_t>(n_proj_) >= all_imgs_.size()) {
                 process_ = false;
                 project_imgs_ = false;
-                save_images_ = true;
                 n_proj_ = 0;
                 RCLCPP_INFO(this->get_logger(), "Sequência completa! Iniciando salvamento...");
+                std::vector<cv::Mat> process_result;
+                bool debug = this->get_parameter("debug").as_bool();
+                process_result = fringe_process_ptr_->calculate_abs_phi_images(debug);
+                RCLCPP_INFO(this->get_logger(), "Publishing processed images");
+                publish_processed_images(process_result);
+                if (debug){
+                    publish_processed_debug_images(process_result);
+                }
             } 
 
         } catch (cv_bridge::Exception& e) {
@@ -288,18 +305,99 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
     }
 }
 
-// Função auxiliar para evitar repetição de código
+// Publish 64 float image to triangulation node
+void StereoProcessNode::publish_processed_images(std::vector<cv::Mat> images)
+{
+    if (images.size() < 4) {
+        RCLCPP_WARN(this->get_logger(), "Falha ao publicar: Vetor de imagens incompleto!");
+        return;
+    }
+
+    // Cria um header sincronizado para o par estéreo
+    std_msgs::msg::Header header_left;
+    std_msgs::msg::Header header_right;
+    header_left.stamp = this->get_clock()->now();
+    header_right.stamp = header_left.stamp;
+    header_left.frame_id = "Active/left_camera_link"; // Ajuste para o frame de TF real do VORIS
+    header_right.frame_id = "Active/right_camera_link"; // Ajuste para o frame de TF real do VORIS
+
+    try {
+        // Converte e publica a Fase Esquerda (phi_l)
+        auto msg_phi_l = cv_bridge::CvImage(header_left, "64FC1", images[0]).toImageMsg();
+        pub_abs_left_->publish(*msg_phi_l);
+
+        // Converte e publica a Fase Direita (phi_r)
+        auto msg_phi_r = cv_bridge::CvImage(header_right, "64FC1", images[1]).toImageMsg();
+        pub_abs_right_->publish(*msg_phi_r);
+
+        // Converte e publica a Modulação Esquerda (mod_l)
+        auto msg_mod_l = cv_bridge::CvImage(header_left, "64FC1", images[2]).toImageMsg();
+        pub_mod_left_->publish(*msg_mod_l);
+
+        // Converte e publica a Modulação Direita (mod_r)
+        auto msg_mod_r = cv_bridge::CvImage(header_right, "64FC1", images[3]).toImageMsg();
+        pub_mod_right_->publish(*msg_mod_r);
+
+        RCLCPP_INFO(this->get_logger(), ">>> Mapas 64FC1 publicados com sucesso no ROS 2.");
+
+    } catch (cv_bridge::Exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "Erro fatal no cv_bridge: %s", e.what());
+    }
+}
+
+// Publish debug image to visualize phase and modulation maps
+void StereoProcessNode::publish_processed_debug_images(std::vector<cv::Mat> images)
+{
+    if (images.size() < 4) {
+        RCLCPP_WARN(this->get_logger(), "Falha ao publicar 8U: Vetor de imagens incompleto!");
+        return;
+    }
+
+    std_msgs::msg::Header header;
+    header.stamp = this->get_clock()->now();
+    header.frame_id = "camera_link"; 
+
+    try {
+        // Função lambda auxiliar para normalizar e publicar sem repetir código
+        auto publish_normalized = [&](rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub, const cv::Mat& img64) {
+            if (!img64.empty()) {
+                cv::Mat img8u;
+                // O Segredo: Escala o Min/Max dinamicamente para caber entre 0 e 255
+                cv::normalize(img64, img8u, 0, 255, cv::NORM_MINMAX, CV_8U);
+                
+                // "mono8" é a string oficial do sensor_msgs para imagens 8UC1
+                auto msg = cv_bridge::CvImage(header, "mono8", img8u).toImageMsg();
+                pub->publish(*msg);
+            }
+        };
+
+        // Dispara as publicações
+        publish_normalized(pub_abs_left_debug_, images[0]); // Fase Esq
+        publish_normalized(pub_abs_right_debug_, images[1]); // Fase Dir
+        publish_normalized(pub_mod_left_debug_, images[2]); // Mod Esq
+        publish_normalized(pub_mod_right_debug_, images[3]); // Mod Dir
+
+        RCLCPP_INFO(this->get_logger(), ">>> Mapas 8UC1 (Visualizacao) publicados com sucesso.");
+
+    } catch (cv_bridge::Exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "Erro no cv_bridge (8U): %s", e.what());
+    }
+}
+
+// Auxiliar function for trigger
 void StereoProcessNode::send_trigger()
 {
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     trigger_client_->async_send_request(
         request,
         [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
-            this->_trigger_callback(future);
+            this->trigger_callback(future);
         }
     );
 }
-void StereoProcessNode::_trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+
+// Trigger callback
+void StereoProcessNode::trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
 {
     try {
         // 1. Tenta obter o resultado do "future"
@@ -318,5 +416,6 @@ void StereoProcessNode::_trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>
         RCLCPP_ERROR(this->get_logger(), "Exceção ao receber resposta do serviço: %s", e.what());
     }
 }
+
 
 RCLCPP_COMPONENTS_REGISTER_NODE(StereoProcessNode)

@@ -31,7 +31,7 @@ public:
 
     bool save_images(std::string path);
     // Retorna {abs_phi_l, abs_phi_r, mod_l, mod_r}
-    std::vector<cv::Mat> calculate_abs_phi_images();
+    std::vector<cv::Mat> calculate_abs_phi_images(bool save_debug);
 
 private:
     int n_bits;
