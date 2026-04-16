@@ -67,8 +67,7 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     // Publihser debug images
     pub_abs_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/phase_map", 10);
     pub_abs_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/phase_map", 10);
-    pub_mod_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/modulation_map", 10);
-    pub_mod_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/modulation_map", 10);
+
 
     // Services
     change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoProcessNode::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
@@ -291,9 +290,6 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
                 process_result = fringe_process_ptr_->calculate_abs_phi_images(debug);
                 RCLCPP_INFO(this->get_logger(), "Publishing processed images");
                 publish_processed_images(process_result);
-                if (debug){
-                    publish_processed_debug_images(process_result);
-                }
             } 
 
         } catch (cv_bridge::Exception& e) {
@@ -322,6 +318,18 @@ void StereoProcessNode::publish_processed_images(std::vector<cv::Mat> images)
     header_right.frame_id = "Active/right_camera_link"; // Ajuste para o frame de TF real do VORIS
 
     try {
+        // Função lambda auxiliar para normalizar e publicar sem repetir código
+        auto publish_normalized = [&](rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub, const cv::Mat& img64, std_msgs::msg::Header hd) {
+            if (!img64.empty()) {
+                cv::Mat img8u;
+                // O Segredo: Escala o Min/Max dinamicamente para caber entre 0 e 255
+                cv::normalize(img64, img8u, 0, 255, cv::NORM_MINMAX, CV_8U);
+                
+                // "mono8" é a string oficial do sensor_msgs para imagens 8UC1
+                auto msg = cv_bridge::CvImage(hd, "mono8", img8u).toImageMsg();
+                pub->publish(*msg);
+            }
+        };
         // Converte e publica a Fase Esquerda (phi_l)
         auto msg_phi_l = cv_bridge::CvImage(header_left, "64FC1", images[0]).toImageMsg();
         pub_abs_left_->publish(*msg_phi_l);
@@ -331,12 +339,14 @@ void StereoProcessNode::publish_processed_images(std::vector<cv::Mat> images)
         pub_abs_right_->publish(*msg_phi_r);
 
         // Converte e publica a Modulação Esquerda (mod_l)
-        auto msg_mod_l = cv_bridge::CvImage(header_left, "64FC1", images[2]).toImageMsg();
-        pub_mod_left_->publish(*msg_mod_l);
+        publish_normalized(pub_mod_left_, images[2], header_left); // Mod Esq
+        publish_normalized(pub_mod_right_, images[3], header_right); // Mod Dir
 
-        // Converte e publica a Modulação Direita (mod_r)
-        auto msg_mod_r = cv_bridge::CvImage(header_right, "64FC1", images[3]).toImageMsg();
-        pub_mod_right_->publish(*msg_mod_r);
+        if(this->get_parameter("debug").as_bool()){
+            //  Publish phase map to visualize
+            publish_normalized(pub_abs_left_debug_, images[0], header_left); // Fase Esq
+            publish_normalized(pub_abs_right_debug_, images[1], header_right); // Fase Dir
+        }
 
         RCLCPP_INFO(this->get_logger(), ">>> Mapas 64FC1 publicados com sucesso no ROS 2.");
 
@@ -345,44 +355,6 @@ void StereoProcessNode::publish_processed_images(std::vector<cv::Mat> images)
     }
 }
 
-// Publish debug image to visualize phase and modulation maps
-void StereoProcessNode::publish_processed_debug_images(std::vector<cv::Mat> images)
-{
-    if (images.size() < 4) {
-        RCLCPP_WARN(this->get_logger(), "Falha ao publicar 8U: Vetor de imagens incompleto!");
-        return;
-    }
-
-    std_msgs::msg::Header header;
-    header.stamp = this->get_clock()->now();
-    header.frame_id = "camera_link"; 
-
-    try {
-        // Função lambda auxiliar para normalizar e publicar sem repetir código
-        auto publish_normalized = [&](rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub, const cv::Mat& img64) {
-            if (!img64.empty()) {
-                cv::Mat img8u;
-                // O Segredo: Escala o Min/Max dinamicamente para caber entre 0 e 255
-                cv::normalize(img64, img8u, 0, 255, cv::NORM_MINMAX, CV_8U);
-                
-                // "mono8" é a string oficial do sensor_msgs para imagens 8UC1
-                auto msg = cv_bridge::CvImage(header, "mono8", img8u).toImageMsg();
-                pub->publish(*msg);
-            }
-        };
-
-        // Dispara as publicações
-        publish_normalized(pub_abs_left_debug_, images[0]); // Fase Esq
-        publish_normalized(pub_abs_right_debug_, images[1]); // Fase Dir
-        publish_normalized(pub_mod_left_debug_, images[2]); // Mod Esq
-        publish_normalized(pub_mod_right_debug_, images[3]); // Mod Dir
-
-        RCLCPP_INFO(this->get_logger(), ">>> Mapas 8UC1 (Visualizacao) publicados com sucesso.");
-
-    } catch (cv_bridge::Exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "Erro no cv_bridge (8U): %s", e.what());
-    }
-}
 
 // Auxiliar function for trigger
 void StereoProcessNode::send_trigger()

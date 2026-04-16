@@ -8,17 +8,17 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
                 'namespace',
-                default_value='SM4',
+                default_value='Active',
                 description='Namespace'
             ),
         DeclareLaunchArgument(
                 'mod_tresh',
-                default_value='50',
+                default_value='30',
                 description='num_splits'
             ),
         DeclareLaunchArgument(
                 'rad_tresh',
-                default_value='0.06',
+                default_value='0.05',
                 description='num_splits'
             ),
         DeclareLaunchArgument(
@@ -33,7 +33,7 @@ def generate_launch_description():
             ),
         DeclareLaunchArgument(
                 'camera_frame_id',
-                default_value='/SM4/left_camera_link',
+                default_value='Active/left_camera_link',
                 description='Camera frame ID'
             ),
         DeclareLaunchArgument(
@@ -74,6 +74,7 @@ def generate_launch_description():
                     'camera_frame_id': LaunchConfiguration('camera_frame_id'),
                     'neightbours': LaunchConfiguration('neighbours'),
                     'radius': LaunchConfiguration('radius'),
+                    'zval': 300,
                 }],
                 remappings=[
                     ('abs_phi_left', 'sync/left/phase_map'),

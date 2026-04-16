@@ -19,8 +19,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(ros2_active_stereo_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
-find_package(OpenCV REQUIRED)
-find_package(OpenCV REQUIRED)
+find_package(OpenCV 4.5.4 EXACT)
 find_package(X11 REQUIRED)
 
 
@@ -49,13 +48,14 @@ target_include_directories(image_project_comp PUBLIC
 
 )
 ament_target_dependencies(image_project_comp
-  rclcpp rclcpp_components std_srvs cv_bridge OpenCV 
+  rclcpp rclcpp_components std_srvs cv_bridge 
 )
 # Registra a biblioteca como um plugin dinâmico do ROS 2
 rclcpp_components_register_nodes(image_project_comp "ImageProjectNode")
 target_link_libraries(image_project_comp
   ${X11_LIBRARIES}
   ${X11_Xinerama_LIB}
+  ${OpenCV_LIBS}
 )
 
 # Cria o Executável Standalone (Para testes com ros2 run)
@@ -82,11 +82,14 @@ target_include_directories(stereo_process_comp PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(stereo_process_comp
-  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport ros2_active_stereo_msgs OpenCV
-)
+  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport ros2_active_stereo_msgs)
 # Registra a biblioteca como um plugin dinâmico do ROS 2
 rclcpp_components_register_nodes(stereo_process_comp "StereoProcessNode")
-
+target_link_libraries(stereo_process_comp
+  ${X11_LIBRARIES}
+  ${X11_Xinerama_LIB}
+  ${OpenCV_LIBS}
+)
 # Cria o Executável Standalone (Para testes com ros2 run)
 add_executable(stereo_process_node src/stereo_process_node.cpp)
 target_link_libraries(stereo_process_node stereo_process_comp)

@@ -91,9 +91,7 @@ private:
     //Debug processed image publisher
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_abs_left_debug_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_abs_right_debug_;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_mod_left_debug_;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_mod_right_debug_;
-    
+
     // Service callback groups;
     rclcpp::CallbackGroup::SharedPtr timer_cb_group_;
     rclcpp::CallbackGroup::SharedPtr srv_cb_group_;
