@@ -53,27 +53,23 @@ class TriangulationNode(Node):
         self.declare_parameter('radius', 12)
 
         self.images = {
-        'abs_phi_left': None,
-        'abs_phi_right': None,
-        'mask_left': None,
-        'mask_right': None
+        'sync/left/phase_map': None,
+        'sync/right/phase_map': None,
+        'sync/left/modulation_map': None,
+        'sync/right/modulation_map': None
         }
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # Services
-        self.process_phase = self.create_client(Empty, 'phase_process')
-        while not self.process_phase.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Service not available, waiting again ...')
-
         self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
         self.phase_process = self.create_client(Trigger, 'phase_process')
-        while not self.phase_process.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info('Service not available, waiting again ...')
+        # while not self.phase_process.wait_for_service(timeout_sec=1.0):
+        #         self.get_logger().info('Service not available, waiting again ...')
 
 
-        self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, '/Passive/disparity/pointcloud', self.z_limits_global, 10)
+        self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, 10)
 
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         # Torch class
@@ -81,21 +77,18 @@ class TriangulationNode(Node):
 
     def _phase_process(self):
         request = Trigger.Request()
-        future = self.process_phase.call_async(request)
+        future = self.phase_process.call_async(request)
         future.add_done_callback(self._phase_callback)
     
     def _phase_callback(self, future):
         try:
             future.result()
-            self.on_activate()
             self.get_logger().info('Serviço de fase executado com sucesso')
         except Exception as e:
             self.get_logger().error(f'Error ao chamar o serviço de fase: {e}')
 
     def process_sm4_callback(self, request, response):
         self.get_logger().info('Inicializando sistema de medição de projeção de franjas')
-        self.current_state = 'ACTIVATING'
-        self.set_state(self.current_state)
         self.process_triang = True
         self._phase_process()
         return response
@@ -103,8 +96,10 @@ class TriangulationNode(Node):
     def image_callback(self, msg, image_type):
 
         # Atualiza o dicionário com a imagem/máscara correspondente
+        self.get_logger().debug(f"Received image for {image_type}")
         self.images[image_type] = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
         if self.zscan is not None:
+            self.get_logger().debug("Zscan initialized, processing images.")
             self.check_and_process_images()
         else:
             self.get_logger().warn("zscan is not initialized yet. Waiting for camera info.")
@@ -113,13 +108,15 @@ class TriangulationNode(Node):
 
         # Verifica se todas as imagens foram recebidas
         if all(image is not None for image in self.images.values()):
+            self.get_logger().info("All images received, starting processing.")
             if self.process_triang:
                 self.process_images()
 
     def process_images(self):
         # TORCH
-        left_images = np.asarray([self.images['abs_phi_left'], self.images['mask_left']])
-        right_images = np.asarray([self.images['abs_phi_right'], self.images['mask_right']])
+        self.get_logger().debug("Processing images with PyTorch.")
+        left_images = np.asarray([self.images['sync/left/phase_map'], self.images['sync/left/modulation_map']])
+        right_images = np.asarray([self.images['sync/right/phase_map'], self.images['sync/right/modulation_map']])
         self.zscan.convert_images(left_images, right_images, apply_clahe=False, undist=True)
 
         self.triangulation()
@@ -128,8 +125,6 @@ class TriangulationNode(Node):
         self.get_logger().info(f'Z range: ({self.zmin:.2f}, {self.zmax:.2f})')
 
         self.get_logger().info("Starting triangulation process.")
-        self.current_state = 'ACTIVATED'
-        self.set_state(self.current_state)
         t0 = time.time()
         
         # Get filter points parameters
@@ -147,6 +142,7 @@ class TriangulationNode(Node):
 
         self.zscan.points3d(x_lim=GRID_LIMITS['x'], y_lim=GRID_LIMITS['y'], z_lim=GRID_LIMITS['z'],
                             xy_step=GRID_STEPS_1['xy'], z_step=GRID_STEPS_1['z'])
+        self.get_logger().info(f"First 3D points computed in {time.time() - t0:.2f} seconds")
                         
         xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=20, method='fringe')
 
@@ -185,8 +181,6 @@ class TriangulationNode(Node):
         corr_filtered_gpu = corr_gpu[filter_mask]
         xyz_filtered_gpu, corr_filtered_gpu = self.zscan.mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
         # final_xyz_gpu, _ = self.zscan.filter_sparse_points(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbors+10, radius=radius-5)
-        self.current_state = 'FINALIZED'
-        self.set_state(self.current_state)
 
         if save_points:
             # Salvar os pontos refinados em um arquivo .txt

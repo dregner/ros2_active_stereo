@@ -38,8 +38,28 @@ def generate_launch_description():
             ),
         DeclareLaunchArgument(
                 'yaml_path',
-                default_value='/home/jetson/ros2_ws/src/ros2_active_stereo/ros2_active_stereo/params/lab_active.yaml',
+                default_value='/home/jetson/ros2_ws/src/ros2_active_stereo/ros2_active_stereo/config/lab_active.yaml',
                 description='Path to the YAML file containing camera parameters'
+            ),
+        DeclareLaunchArgument(
+                'absolute_image',
+                default_value='abs_phi',
+                description='Topic name for the absolute image'
+            ),
+        DeclareLaunchArgument(
+                'modulation_image',
+                default_value='mask',
+                description='Topic name for the modulation image'
+            ),
+        DeclareLaunchArgument(
+                'disparity_pointcloud',
+                default_value='disparity/pointcloud',
+                description='Topic name for the disparity point cloud'
+            ),
+            DeclareLaunchArgument(
+                'triangulated_pointcloud',
+                default_value='triangulated/pointcloud',
+                description='Topic name for the triangulated point cloud'
             ),
 
         Node(
@@ -54,6 +74,14 @@ def generate_launch_description():
                     'camera_frame_id': LaunchConfiguration('camera_frame_id'),
                     'neightbours': LaunchConfiguration('neighbours'),
                     'radius': LaunchConfiguration('radius'),
-                }]
+                }],
+                remappings=[
+                    ('abs_phi_left', 'sync/left/phase_map'),
+                    ('abs_phi_right', 'sync/right/phase_map'),
+                    ('mask_left', 'sync/left/modulation_map'),
+                    ('mask_right', 'sync/right/modulation_map'),
+                    ('passive/pointcloud', LaunchConfiguration('disparity_pointcloud')),
+                    ('pointcloud', LaunchConfiguration('triangulated_pointcloud'))
+                ]
             ),
     ])

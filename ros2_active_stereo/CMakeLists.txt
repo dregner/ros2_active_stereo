@@ -114,6 +114,7 @@ install(DIRECTORY include/
 install(
     PROGRAMS
     scripts/triangulation_node.py
+    scripts/SpatialCorrelation_pytorch.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
