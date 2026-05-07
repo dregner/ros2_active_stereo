@@ -24,7 +24,7 @@ ament_auto_find_build_dependencies()
 
 # Generate ROS messages
 rosidl_generate_interfaces(
-  orbslam3_msgs
+  ros2_active_stereo_msgs
   msg/ActiveStatus.msg
   DEPENDENCIES sensor_msgs std_msgs
 )
