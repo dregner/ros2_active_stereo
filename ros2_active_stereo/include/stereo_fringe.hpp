@@ -1,5 +1,5 @@
-#ifndef StereoProcessNode_HPP
-#define StereoProcessNode_HPP
+#ifndef StereoFringeProcess_HPP
+#define StereoFringeProcess_HPP
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
@@ -17,11 +17,12 @@
 #include <monitor_utils.hpp>
 #include <chrono>
 
-
-class StereoProcessNode : public rclcpp::Node {
+namespace ros2_active_stereo
+{
+class StereoFringeProcess : public rclcpp::Node {
 public:
-    StereoProcessNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
-    ~StereoProcessNode() override;
+    StereoFringeProcess(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
+    ~StereoFringeProcess() override;
 
 private:
     bool get_screen_resolution(const std::string& monitor_name);
@@ -104,4 +105,5 @@ private:
     // Projection timer callback
     rclcpp::TimerBase::SharedPtr timer_;
 }; 
-#endif // StereoProcessNode_HPP
+}
+#endif // StereoFringeProcess_HPP

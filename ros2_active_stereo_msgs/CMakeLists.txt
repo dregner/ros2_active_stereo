@@ -20,13 +20,18 @@ if(_dump_all_variables)
 endif()
 
 find_package(ament_cmake_auto REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
 ament_auto_find_build_dependencies()
 
 # Generate ROS messages
-rosidl_generate_interfaces(
-  ros2_active_stereo_msgs
-  msg/ActiveStatus.msg
-  DEPENDENCIES sensor_msgs std_msgs
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/ActiveStatus.msg"
+  "srv/MoveMotor.srv"
+  DEPENDENCIES builtin_interfaces sensor_msgs std_msgs
 )
 
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 ament_auto_package()

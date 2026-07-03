@@ -64,7 +64,7 @@ def generate_launch_description():
 
         Node(
                 package='ros2_active_stereo',
-                executable='triangulation_node.py',
+                executable='triangulation_fringe_node.py',
                 name='structured_light_inverse_triang_node',
                 namespace=LaunchConfiguration('namespace'),
                 parameters=[{

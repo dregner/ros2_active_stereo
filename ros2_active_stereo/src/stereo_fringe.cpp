@@ -1,8 +1,9 @@
-#include <stereo_process.hpp>
+#include <stereo_fringe.hpp>
 #include <chrono>
 
-
-StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
+namespace ros2_active_stereo
+{
+StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
 : Node("image_project_node", options), n_proj_(0), project_imgs_(false)
 {
     // Node params
@@ -56,8 +57,8 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
     sub_left_.subscribe(this, "left/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sub_right_.subscribe(this, "right/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(1), sub_left_, sub_right_);
-    sync_->registerCallback(std::bind(&StereoProcessNode::stereo_callback, this, std::placeholders::_1, std::placeholders::_2));
-    camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoProcessNode::camera_info_cb, this, std::placeholders::_1));
+    sync_->registerCallback(std::bind(&StereoFringeProcess::stereo_callback, this, std::placeholders::_1, std::placeholders::_2));
+    camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoFringeProcess::camera_info_cb, this, std::placeholders::_1));
 
     //Publisher 64F images
     pub_abs_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/phase_map", 10);
@@ -70,22 +71,22 @@ StereoProcessNode::StereoProcessNode(const rclcpp::NodeOptions & options)
 
 
     // Services
-    change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoProcessNode::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
-    process_service_ = this->create_service<std_srvs::srv::Trigger>("phase_process", std::bind(&StereoProcessNode::process_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
+    change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoFringeProcess::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
+    process_service_ = this->create_service<std_srvs::srv::Trigger>("phase_process", std::bind(&StereoFringeProcess::process_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>("trigger", rmw_qos_profile_default, srv_cb_group_);
 
     // Timer callback for projection
-    timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<long>(timer_hz_)), std::bind(&StereoProcessNode::project_image_timer_cb, this), timer_cb_group_ );
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(static_cast<long>(timer_hz_)), std::bind(&StereoFringeProcess::project_image_timer_cb, this), timer_cb_group_ );
 
 
 }
 
-StereoProcessNode::~StereoProcessNode() {
+StereoFringeProcess::~StereoFringeProcess() {
     cv::destroyWindow(window_name_);
 }
 
 // Process service callback
-void StereoProcessNode::process_srv_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+void StereoFringeProcess::process_srv_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     const std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
     RCLCPP_INFO(this->get_logger(), "Initate acquisition...");
     n_proj_ = 0; // Garante que a projeção comece do início
@@ -97,7 +98,7 @@ void StereoProcessNode::process_srv_cb(const std::shared_ptr<std_srvs::srv::Trig
 }
 
 // Get Monitor resolution
-bool StereoProcessNode::get_screen_resolution(const std::string& monitor_name)
+bool StereoFringeProcess::get_screen_resolution(const std::string& monitor_name)
 {
     auto monitors = get_monitors();
 
@@ -132,7 +133,7 @@ bool StereoProcessNode::get_screen_resolution(const std::string& monitor_name)
 }
 
 // Construct opencv projection window
-void StereoProcessNode::construct_window() 
+void StereoFringeProcess::construct_window() 
 {
 
     cv::namedWindow(window_name_, cv::WINDOW_NORMAL);  // allow resizing
@@ -140,7 +141,7 @@ void StereoProcessNode::construct_window()
 }
 
 /* Timer callback for projecting images */
-void StereoProcessNode::project_image_timer_cb()
+void StereoFringeProcess::project_image_timer_cb()
 {
     int px_f = this->get_parameter("pixel_per_fringe").as_int();
     int steps = this->get_parameter("fringe_steps").as_int();
@@ -209,7 +210,7 @@ void StereoProcessNode::project_image_timer_cb()
 }
 
 /*Bool Project service callback, False: reset, true: start process*/
-void StereoProcessNode::project_cb(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+void StereoFringeProcess::project_cb(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                          const std::shared_ptr<std_srvs::srv::SetBool::Response> response)
 {
     
@@ -242,7 +243,7 @@ void StereoProcessNode::project_cb(const std::shared_ptr<std_srvs::srv::SetBool:
 }
 
 // Left camera info callback
-void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg)
+void StereoFringeProcess::camera_info_cb(const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg)
 {
     if(receive_camera_info_) return; // Evita processar múltiplas vezes
     cv::Size cam_res(msg->width, msg->height);
@@ -253,7 +254,7 @@ void StereoProcessNode::camera_info_cb(const sensor_msgs::msg::CameraInfo::Const
 }
 
 // Stereo message filter callback (exact time -> tirggered via hardware)
-void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
+void StereoFringeProcess::stereo_callback(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                                         const sensor_msgs::msg::Image::ConstSharedPtr& right_msg) 
 {
 
@@ -302,7 +303,7 @@ void StereoProcessNode::stereo_callback(const sensor_msgs::msg::Image::ConstShar
 }
 
 // Publish 64 float image to triangulation node
-void StereoProcessNode::publish_processed_images(std::vector<cv::Mat> images)
+void StereoFringeProcess::publish_processed_images(std::vector<cv::Mat> images)
 {
     if (images.size() < 4) {
         RCLCPP_WARN(this->get_logger(), "Falha ao publicar: Vetor de imagens incompleto!");
@@ -357,7 +358,7 @@ void StereoProcessNode::publish_processed_images(std::vector<cv::Mat> images)
 
 
 // Auxiliar function for trigger
-void StereoProcessNode::send_trigger()
+void StereoFringeProcess::send_trigger()
 {
     auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
     trigger_client_->async_send_request(
@@ -369,7 +370,7 @@ void StereoProcessNode::send_trigger()
 }
 
 // Trigger callback
-void StereoProcessNode::trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
+void StereoFringeProcess::trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
 {
     try {
         // 1. Tenta obter o resultado do "future"
@@ -388,6 +389,6 @@ void StereoProcessNode::trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>:
         RCLCPP_ERROR(this->get_logger(), "Exceção ao receber resposta do serviço: %s", e.what());
     }
 }
+}
 
-
-RCLCPP_COMPONENTS_REGISTER_NODE(StereoProcessNode)
+RCLCPP_COMPONENTS_REGISTER_NODE(ros2_active_stereo::StereoFringeProcess)

@@ -24,10 +24,10 @@ find_package(X11 REQUIRED)
 
 
 # Manually specify the path to gpiod
-# find_package(PkgConfig REQUIRED)
-# pkg_check_modules(GPIOD REQUIRED libgpiod)
-# include_directories(${GPIOD_INCLUDE_DIRS})
-# link_directories(${GPIOD_LIBRARY_DIRS})
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GPIOD REQUIRED libgpiod)
+include_directories(${GPIOD_INCLUDE_DIRS})
+link_directories(${GPIOD_LIBRARY_DIRS})
 
 # # Manually specify the path to libnoise
 # set(LIBNOISE_INCLUDE_DIRS "/usr/local/include")
@@ -58,43 +58,31 @@ target_link_libraries(image_project_comp
   ${OpenCV_LIBS}
 )
 
-# Cria o Executável Standalone (Para testes com ros2 run)
-add_executable(image_project_node src/image_project_node.cpp)
-target_link_libraries(image_project_node image_project_comp X11 Xinerama)
-ament_target_dependencies(image_project_node rclcpp)
+add_executable(gpio_control src/gpio_control.cpp)
+target_link_libraries(gpio_control ${GPIOD_LIBRARIES} "${cpp_typesupport_target}")
+ament_target_dependencies(gpio_control rclcpp std_msgs std_srvs ros2_active_stereo_msgs)
 
-
-# ==============================================================================
-# FRINGE PROCESS NODE (Stereo Process)
-# ==============================================================================
-
-# Cria a Biblioteca Compartilhada (O Componente / Plugin)
-add_library(stereo_process_comp SHARED
-  src/stereo_process.cpp
+add_library(stereo_fringe_comp SHARED
+  src/stereo_fringe.cpp
   src/structured-light/FringeProcess.cpp
   src/structured-light/FringePattern.cpp
   src/structured-light/GrayCode.cpp
   src/monitor_utils.cpp
 )
 
-target_include_directories(stereo_process_comp PUBLIC
+target_include_directories(stereo_fringe_comp PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-ament_target_dependencies(stereo_process_comp
-  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport ros2_active_stereo_msgs)
-# Registra a biblioteca como um plugin dinâmico do ROS 2
-rclcpp_components_register_nodes(stereo_process_comp "StereoProcessNode")
-target_link_libraries(stereo_process_comp
-  ${X11_LIBRARIES}
-  ${X11_Xinerama_LIB}
-  ${OpenCV_LIBS}
-)
-# Cria o Executável Standalone (Para testes com ros2 run)
-add_executable(stereo_process_node src/stereo_process_node.cpp)
-target_link_libraries(stereo_process_node stereo_process_comp)
-ament_target_dependencies(stereo_process_node rclcpp)
+ament_target_dependencies(stereo_fringe_comp  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport ros2_active_stereo_msgs)
+target_link_libraries(stereo_fringe_comp  ${X11_LIBRARIES}  ${X11_Xinerama_LIB}  ${OpenCV_LIBS})
+rclcpp_components_register_nodes(stereo_fringe_comp PLUGIN "ros2_active_stereo::StereoFringeProcess" EXECUTABLE stereo_fringe_node)
 
+add_library(stereo_correl_comp SHARED src/stereo_correlation.cpp)
+target_link_libraries(stereo_correl_comp ${OpenCV_LIBS} "${cpp_typesupport_target}")
+ament_target_dependencies(stereo_correl_comp rclcpp_components rclcpp std_srvs sensor_msgs std_msgs cv_bridge message_filters ros2_active_stereo_msgs)
+
+rclcpp_components_register_node(stereo_correl_comp  PLUGIN "ros2_active_stereo::StereoCorrelProcess" EXECUTABLE stereo_correl_node)
 # ==============================================================================
 # REGRAS DE INSTALAÇÃO
 # ==============================================================================
@@ -102,9 +90,9 @@ ament_target_dependencies(stereo_process_node rclcpp)
 # Instala bibliotecas, executáveis e arquivos de cabeçalho
 install(TARGETS
       image_project_comp
-      image_project_node
-      stereo_process_comp
-      stereo_process_node
+      stereo_fringe_comp
+      stereo_correl_comp
+      gpio_control
       ARCHIVE DESTINATION lib
       LIBRARY DESTINATION lib
       RUNTIME DESTINATION lib/${PROJECT_NAME}
@@ -116,7 +104,8 @@ install(DIRECTORY include/
 
 install(
     PROGRAMS
-    scripts/triangulation_node.py
+    scripts/triangulation_fringe_node.py
+    scripts/triangulation_correl_node.py
     scripts/SpatialCorrelation_pytorch.py
     DESTINATION lib/${PROJECT_NAME}
 )

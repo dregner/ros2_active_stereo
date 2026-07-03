@@ -47,8 +47,8 @@ class PyTorchStereoCorrel(nn.Module):
 
         return camera_params
 
-    def convert_images(self, left_imgs_cpu, right_imgs_cpu, apply_clahe=True, undist=True):
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(1, 1))
+    def convert_images(self, left_imgs_cpu, right_imgs_cpu, apply_clahe=True, undist=True, tile=1, climp=2.0):
+        clahe = cv2.createCLAHE(clipLimit=climp, tileGridSize=(tile, tile))
 
         def process_image(img, cam_params):
             if apply_clahe:
@@ -268,18 +268,91 @@ class PyTorchStereoCorrel(nn.Module):
 
         return xyz_gpu[dense_mask], corr_gpu[dense_mask]
 
-    def plot_3d_points(self, x, y, z, color=None, title='Plot 3D'):
-        def to_numpy(tensor):
-            if isinstance(tensor, torch.Tensor):
-                return tensor.cpu().numpy()
-            return tensor
-        
-        fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        ax.title.set_text(title)
+    def std_mask_points(self, xyz_gpu: torch.Tensor, corr_gpu: torch.Tensor, bounds, method='correl') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-        scatter = ax.scatter(to_numpy(x), to_numpy(y), to_numpy(z), c=to_numpy(color), cmap='viridis', marker='o')
-        plt.colorbar(scatter, ax=ax, shrink=0.5, aspect=5)
-        ax.set_xlabel('X [mm]'); ax.set_ylabel('Y [mm]'); ax.set_zlabel('Z [mm]')
-        ax.set_aspect('equal', adjustable='box')
-        plt.show()
+        uv_left_final, _ = self.transform_gcs2ccs(xyz_gpu, 'left', image_shape=self.left_images.shape[1:])
+        uv_right_final, _ = self.transform_gcs2ccs(xyz_gpu, 'right', image_shape=self.right_images.shape[1:])
+        L_interp, R_interp = self.interpolate_images(self.left_images, uv_left_final), self.interpolate_images(self.right_images, uv_right_final)
+
+        if method == 'fringe':
+            std_mask = (L_interp[:,1]> bounds) & (R_interp[:,1] > bounds)
+            L_masked = L_interp[:, 1]
+        else:
+            L_std, R_std = L_interp.std(dim=1), R_interp.std(dim=1)
+            std_mask = (bounds < L_std) & (bounds < R_std)
+            L_masked = L_std
+
+        combined_mask = std_mask
+        xyz_masked = xyz_gpu[combined_mask]
+        corr_masked = corr_gpu[combined_mask]
+        L_masked = L_masked[combined_mask]
+
+
+        return xyz_masked, corr_masked, L_masked 
+       
+    def mask_uv_points(self, xyz_gpu: torch.Tensor, corr_gpu: torch.Tensor, crop_factor: float = 1.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        uv_left_final, uv_left_final_mask = self.transform_gcs2ccs(xyz_gpu, 'left', image_shape=self.left_images.shape[1:])
+        _, uv_right_final_mask = self.transform_gcs2ccs(xyz_gpu, 'right', image_shape=self.right_images.shape[1:])
+        L_masked = self.interpolate_images(self.left_images, uv_left_final)[:,0]
+
+        # Crop mask based on center
+        if crop_factor < 1.0:
+            H, W = self.left_images.shape[1:]
+            ymin, ymax, xmin, xmax = self.get_cropped_image_bounds((H, W), crop_factor)
+            crop_mask = (
+                (uv_left_final[:, 0] >= xmin) & (uv_left_final[:, 0] < xmax) &
+                (uv_left_final[:, 1] >= ymin) & (uv_left_final[:, 1] < ymax)
+            )
+        else:
+            crop_mask = torch.ones_like(uv_left_final_mask, dtype=torch.bool)
+
+        combined_mask = uv_left_final_mask & uv_right_final_mask & crop_mask
+        xyz_masked = xyz_gpu[combined_mask]
+        corr_masked = corr_gpu[combined_mask]
+        L_masked = L_masked[combined_mask]
+
+        return xyz_masked, corr_masked, L_masked
+    
+    def euclidean_filter(self, xyz_gpu: torch.Tensor, corr_gpu: torch.Tensor = None, interp: torch.Tensor = None, min_neighbors: int = 5, radius: float = 10.0, batch_size=1024) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        n = xyz_gpu.shape[0]
+        final_mask = torch.zeros(n, dtype=torch.bool, device=xyz_gpu.device)
+    
+        # Itera sobre os pontos em lotes
+        for i in range(0, n, batch_size):
+            i_end = min(i + batch_size, n)
+            
+            # Pega o lote de pontos atual
+            xyz_batch = xyz_gpu[i:i_end]
+
+            # Calcula a matriz de distância APENAS entre o lote atual e TODOS os outros pontos.
+            # Isso ainda pode ser grande, mas é uma melhora significativa.
+            dist_batch = torch.cdist(xyz_batch, xyz_gpu)
+
+            # 1. Aplica o filtro de raio (mask_dist)
+            # As distâncias entre um ponto e ele mesmo são 0, então `dist_batch > 0` já exclui a diagonal do lote
+            # (se o lote for a matriz completa) e garante que o ponto não seja seu próprio vizinho.
+            mask_dist = (dist_batch > 0) & (dist_batch < radius)
+
+            # 2. Conta os vizinhos para cada ponto do lote
+            neighbors_count = mask_dist.sum(dim=1)
+
+            # 3. Cria a máscara para os pontos que têm vizinhos suficientes
+            mask_neighbors = neighbors_count > min_neighbors
+
+            # 4. Atualiza a máscara final
+            final_mask[i:i_end] = mask_neighbors
+
+            # Opcional: Limpa a memória para liberar a GPU
+            del dist_batch, mask_dist, neighbors_count, mask_neighbors
+            torch.cuda.empty_cache()
+        if corr_gpu is None and interp is None:
+            return xyz_gpu[final_mask], None, None
+        
+        elif corr_gpu is None and interp is not None:
+            return xyz_gpu[final_mask], None,interp[final_mask]
+        
+        elif corr_gpu is not None and interp is None:
+            return xyz_gpu[final_mask], corr_gpu[final_mask], None
+        else:
+            # Aplica a máscara final aos tensores originais
+            return xyz_gpu[final_mask], corr_gpu[final_mask], interp[final_mask]

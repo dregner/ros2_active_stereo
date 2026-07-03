@@ -61,7 +61,7 @@ class TriangulationNode(Node):
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
+        self.process_triang = False
         # Services
         self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
         self.phase_process = self.create_client(Trigger, 'phase_process')
@@ -154,9 +154,6 @@ class TriangulationNode(Node):
         # clean points based on neighbours
         # final_xyz_gpu, _ = self.zscan.filter_sparse_points( xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu,min_neighbors=min_neighbors, radius=radius)
         
-        if save_points:
-            # Salvar os pontos refinados em um arquivo .txt
-            self.save_pointcloud(points=xyz_filtered_gpu.cpu().numpy(), filename='1_' + filename)
 
         if xyz_filtered_gpu.numel() == 0:
             self.get_logger().warning("No points found")
@@ -190,7 +187,7 @@ class TriangulationNode(Node):
 
         if save_points:
             # Salvar os pontos refinados em um arquivo .txt
-            self.save_pointcloud(points=xyz_filtered_gpu.cpu().numpy(), filename='2_' + filename)
+            np.savetxt('{}_{}.txt'.format(time.strftime("%Y%m%d"), filename), xyz_filtered_gpu.cpu().numpy(), fmt='%.6f')
 
         # Publicar os pontos refinados
         self.get_logger().info(f'2nd Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_filtered_gpu.shape[0]}')
@@ -238,10 +235,7 @@ class TriangulationNode(Node):
             is_dense=True
         )
     
-    def save_pointcloud(self, points, filename):
-        # Salva os pontos em um arquivo .txt
-        np.savetxt('{}.txt'.format(filename), points, fmt='%.6f', delimiter=' ')
-        self.get_logger().info(f"Point cloud saved to {filename}")
+
 
     def z_limits_global(self, points):
 
