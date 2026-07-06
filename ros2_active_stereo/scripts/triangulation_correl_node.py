@@ -42,9 +42,8 @@ class InverseTriangulationNode(Node):
         self.declare_parameter('debug_save_points', False)
         self.declare_parameter('n_images', 10)
         self.declare_parameter('camera_frame_id', 'SM3/left_camera_link')
+        self.declare_parameter('zval', 500)
 
-        self.tile = self.get_parameter('tile').get_parameter_value().integer_value
-        self.climp = self.get_parameter('climp').get_parameter_value().double_value
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         self.num_images = self.get_parameter('n_images').get_parameter_value().integer_value
         kernel = self.get_parameter('window_size').get_parameter_value().integer_value
@@ -66,8 +65,8 @@ class InverseTriangulationNode(Node):
         self.perform_correl = False
 
         # Construct variables in case disparity point cloud is not available
-        self.zmin = -300
-        self.zmax = 1000
+        self.zmin = -self.get_parameter('zval').get_parameter_value().integer_value
+        self.zmax = self.get_parameter('zval').get_parameter_value().integer_value
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -100,19 +99,18 @@ class InverseTriangulationNode(Node):
         self.image_process()
         
     def image_process(self):
-        self.tile = self.get_parameter('tile').get_parameter_value().integer_value
-        self.climp = self.get_parameter('climp').get_parameter_value().double_value
+        tile = self.get_parameter('tile').get_parameter_value().integer_value
+        climp = self.get_parameter('climp').get_parameter_value().double_value
 
         if self.perform_correl:
             t0 = time.time()
-            self.zscan.convert_images(left_imgs_cpu=self.left_images, right_imgs_cpu=self.right_images, apply_clahe=True, undist=True, tile=self.tile, climp=self.climp)
+            self.zscan.convert_images(left_imgs_cpu=self.left_images, right_imgs_cpu=self.right_images, apply_clahe=True, undist=True, tile=tile, climp=climp)
             self.get_logger().info('Images converted: {:.2f} s'.format(time.time()-t0))
-            self.spatial_3d_correl_process()
+            self.triangulation()
             self.get_logger().info('Correlation process finished: {:.2f} s'.format(time.time()-t0))
             self.perform_correl = False
             self.left_images.clear()
             self.right_images.clear()
-            
             
             # --- Limpando a memoria
             # 1. Cortamos as referências dos tensores dentro da classe PyTorch
@@ -132,27 +130,29 @@ class InverseTriangulationNode(Node):
             # -------------------------------
             
 
-    def spatial_3d_correl_process(self):
+    def triangulation(self):
         """
             Function to perform spatial correlation
         """
 
+        self.get_logger().info("Starting triangulation process.")
+        t0 = time.time()
         # Get filter points parameters
-        std_thresh = self.get_parameter('std_thresh').value
-        correl_thresh = self.get_parameter('threshold').value
+        std_thresh = self.get_parameter('std_thresh').get_parameter_value().double_value
+        correl_thresh = self.get_parameter('threshold').get_parameter_value().double_value
         win_size = self.get_parameter('window_size').get_parameter_value().integer_value
         stride = self.get_parameter('stride').get_parameter_value().integer_value
 
-        radius = self.get_parameter('radius').value
-        min_neighbours = self.get_parameter('neighbours').value
-        save_points = self.get_parameter('debug_save_points').value
+        radius = self.get_parameter('radius').get_parameter_value().double_value
+        min_neighbours = self.get_parameter('neighbours').get_parameter_value().integer_value
+        save_points = self.get_parameter('debug_save_points').get_parameter_value().bool_value
         filename = self.get_parameter('save_filename').get_parameter_value().string_value
-        crop_factor = self.get_parameter('crop_image_factor').value
+        crop_factor = self.get_parameter('crop_image_factor').get_parameter_value().double_value
 
         GRID_LIMITS = {'x': (-100, 500), 'y': (-100, 400), 'z': (self.zmin, self.zmax)}
-        GRID_STEPS_1 = {'xy': 2.0, 'z': 1} # first steps of 3d patch
+        GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
         GRID_STEPS_2 = {'xy': 1.0, 'z': 1.0} # second steps of 3d patch
-        # GRID_STEPS_3= {'xy': 1.0, 'z': 0.1} # second steps of 3d patch
+        # GRID_STEPS_3= {'xy': 1.0, 'z': 0.01} # second steps of 3d patch
 
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
 
@@ -198,12 +198,12 @@ class InverseTriangulationNode(Node):
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=std_thresh, method='correl')
         final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
 
-        pcl_points = self.convert_to_pointcloud2(final_xyz_gpu.cpu().numpy())
-        self.pcl_publisher.publish(pcl_points)
+        self.get_logger().info(f'2nd Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
+        self.publish_pointcloud(final_xyz_gpu.cpu().numpy())
 
 
         if save_points:
-            np.savetxt('{}_{}.txt'.format(time.strftime("%Y%m%d"), filename), xyz_filtered_gpu.cpu().numpy(), fmt='%.6f')
+            np.savetxt('{}_{}.txt'.format(time.strftime("%Y%m%d"), filename), final_xyz_gpu.cpu().numpy(), fmt='%.6f')
         
         del xyz_gpu, corr_gpu, xyz_filtered_gpu, corr_filtered_gpu, final_xyz_gpu # limpando memoria
             
@@ -280,26 +280,35 @@ class InverseTriangulationNode(Node):
 
         return transformation_matrix
 
-    def convert_to_pointcloud2(self, points):
-        frame_id = self.get_parameter('camera_frame_id').get_parameter_value().string_value
-        t_left = self.zscan.camera_params['left']['t'].cpu().numpy().T[0]
-        r_left = self.zscan.camera_params['left']['r'].cpu().numpy()
-        points = (r_left @ points.T).T + t_left
+    def publish_pointcloud(self, points):
+        T_left = self.zscan.camera_params['left']['t'].cpu().numpy().T[0]  # Obter translação da câmera esquerda
+        R_left = self.zscan.camera_params['left']['r'].cpu().numpy()
 
+        # rotação primiero e translação depois
+        points = (R_left @ points.T).T + T_left
+        # points = points + T_left
+
+        if points is not None:
+            pointcloud_msg = self.convert_to_pointcloud2(points)
+            self.pointcloud_publisher.publish(pointcloud_msg)
+
+    def convert_to_pointcloud2(self, points):
+        self.frame_id = self.get_parameter('camera_frame_id').value
         # Converte para mensagem PointCloud2
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
-        header.frame_id = frame_id
+        header.frame_id = self.frame_id
         fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1)
         ]
-
+        
         # Corrige a escala dos pontos de metros para milímetros
         points = np.divide(points, 1000.0)
-
+        
         pointcloud_data = b''.join([struct.pack('fff', *p) for p in points])
+
         return PointCloud2(
             header=header,
             height=1,
@@ -310,7 +319,7 @@ class InverseTriangulationNode(Node):
             row_step=12 * len(points),
             data=pointcloud_data,
             is_dense=True
-        )    
+        )
 
 def main(args=None):
     rclpy.init(args=args)

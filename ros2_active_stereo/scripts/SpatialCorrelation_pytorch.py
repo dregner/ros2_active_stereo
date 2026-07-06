@@ -13,7 +13,7 @@ class PyTorchStereoCorrel(nn.Module):
         super().__init__()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # print(f"PyTorch a ser executado no dispositivo: {self.device}")
+        print(f"PyTorch a ser executado no dispositivo: {self.device}")
 
         self.left_images: torch.Tensor | None = None
         self.right_images: torch.Tensor | None = None
@@ -24,6 +24,34 @@ class PyTorchStereoCorrel(nn.Module):
 
         self.epsilon = 1e-10
         self.camera_params = self.read_yaml_file(yaml_file)
+
+
+    def run_grid_diagnostics(self, limits: dict, steps: dict):
+        """
+        Executa um diagnóstico de sensibilidade do grid, verificando como os passos
+        no espaço 3D se traduzem em movimento de pixels na imagem.
+        """
+        print("\n[Diagnóstico] Calculando a sensibilidade do grid para os parâmetros atuais...")
+        
+        x_mid = limits['x'][0] + (limits['x'][1] - limits['x'][0]) / 2
+        y_mid = limits['y'][0] + (limits['y'][1] - limits['y'][0]) / 2
+        z_mid = limits['z'][0] + (limits['z'][1] - limits['z'][0]) / 2
+
+        p_center = torch.tensor([[x_mid, y_mid, z_mid]], dtype=torch.float32, device=self.device)
+        p_step_x = torch.tensor([[x_mid + steps['xy'], y_mid, z_mid]], dtype=torch.float32, device=self.device)
+        p_step_z = torch.tensor([[x_mid, y_mid, z_mid + steps['z']]], dtype=torch.float32, device=self.device)
+
+        uv_center = self.transform_gcs2ccs(p_center, 'left')
+        uv_step_x = self.transform_gcs2ccs(p_step_x, 'left')
+        uv_step_z = self.transform_gcs2ccs(p_step_z, 'left')
+
+        if uv_center.min() > 0 and uv_step_x.min() > 0 and uv_step_z.min() > 0:
+            dist_pix_x = torch.linalg.norm(uv_step_x - uv_center).item()
+            dist_pix_z = torch.linalg.norm(uv_step_z - uv_center).item()
+
+            print(f"  > Passo XY de {steps['xy']:.1f} mm equivale a um deslocamento de {dist_pix_x:.3f} pixels na imagem.")
+            print(f"  > Passo Z de {steps['z']:.1f} mm equivale a um deslocamento de {dist_pix_z:.3f} pixels na imagem.")
+        print("-" * 20)
 
     def read_yaml_file(self, yaml_file: str) -> dict:
         """Lê os parâmetros de calibração de um arquivo YAML e os retorna."""
@@ -37,38 +65,43 @@ class PyTorchStereoCorrel(nn.Module):
         }
 
         for cam in ['left', 'right']:
-            camera_params[cam]['kk'] = torch.tensor(params[f'camera_matrix_{cam}'], dtype=torch.double, device=self.device)
-            camera_params[cam]['kc'] = torch.tensor(params[f'dist_coeffs_{cam}'], dtype=torch.double, device=self.device)
-            camera_params[cam]['r'] = torch.tensor(params[f'rot_matrix_{cam}'], dtype=torch.double, device=self.device)
-            camera_params[cam]['t'] = torch.tensor(params[f't_{cam}'], dtype=torch.double, device=self.device).view(3, 1)
+            camera_params[cam]['kk'] = torch.tensor(params[f'camera_matrix_{cam}'], dtype=torch.float32, device=self.device)
+            camera_params[cam]['kc'] = torch.tensor(params[f'dist_coeffs_{cam}'], dtype=torch.float32, device=self.device)
+            camera_params[cam]['r'] = torch.tensor(params[f'rot_matrix_{cam}'], dtype=torch.float32, device=self.device)
+            camera_params[cam]['t'] = torch.tensor(params[f't_{cam}'], dtype=torch.float32, device=self.device).view(3, 1)
     
-        camera_params['stereo']['R'] = torch.tensor(params['R'], dtype=torch.double, device=self.device)
-        camera_params['stereo']['T'] = torch.tensor(params['T'], dtype=torch.double, device=self.device).view(3, 1)
+        camera_params['stereo']['R'] = torch.tensor(params['R'], dtype=torch.float32, device=self.device)
+        camera_params['stereo']['T'] = torch.tensor(params['T'], dtype=torch.float32, device=self.device).view(3, 1)
 
         return camera_params
 
     def convert_images(self, left_imgs_cpu, right_imgs_cpu, apply_clahe=True, undist=True, tile=1, climp=2.0):
-        clahe = cv2.createCLAHE(clipLimit=climp, tileGridSize=(tile, tile))
+        if apply_clahe:
+            clahe = cv2.createCLAHE(clipLimit=climp, tileGridSize=(tile, tile))
 
         def process_image(img, cam_params):
             if apply_clahe:
                 img = clahe.apply(img)
             if undist:
-                k = cam_params['kk'].cpu().numpy()
-                kc = cam_params['kc'].cpu().numpy()
-                img = cv2.undistort(img, k, kc)
+                img = cv2.undistort(img, cam_params['kk'].cpu().numpy(), cam_params['kc'].cpu().numpy())
             return img
 
         processed_left_imgs = [process_image(img, self.camera_params['left']) for img in left_imgs_cpu]
         processed_right_imgs = [process_image(img, self.camera_params['right']) for img in right_imgs_cpu]
 
-        self.left_images = torch.from_numpy(np.stack(processed_left_imgs, axis=0)).to(self.device, dtype=torch.double)
-        self.right_images = torch.from_numpy(np.stack(processed_right_imgs, axis=0)).to(self.device, dtype=torch.double)
+        self.left_images = torch.from_numpy(np.stack(processed_left_imgs, axis=0)).to(self.device, dtype=torch.float32)
+        self.right_images = torch.from_numpy(np.stack(processed_right_imgs, axis=0)).to(self.device, dtype=torch.float32)
 
+    def remove_img_distortion(self, img, cam_name):
+        """Remove a distorção de uma imagem usando os parâmetros da câmera."""
+        k = self.camera_params[cam_name]['kk'].cpu().numpy()
+        kc = self.camera_params[cam_name]['kc'].cpu().numpy()
+        return cv2.undistort(img, k, kc)
+    
     def points3d(self, x_lim, y_lim, z_lim, xy_step, z_step):
-        self.x_vals = torch.arange(x_lim[0], x_lim[1] + xy_step, xy_step, dtype=torch.float16, device=self.device)
-        self.y_vals = torch.arange(y_lim[0], y_lim[1] + xy_step, xy_step, dtype=torch.float16, device=self.device)
-        self.z_vals = torch.arange(z_lim[0], z_lim[1] + z_step, z_step, dtype=torch.float16, device=self.device)
+        self.x_vals = torch.arange(x_lim[0], x_lim[1] + xy_step, xy_step, dtype=torch.float32, device=self.device)
+        self.y_vals = torch.arange(y_lim[0], y_lim[1] + xy_step, xy_step, dtype=torch.float32, device=self.device)
+        self.z_vals = torch.arange(z_lim[0], z_lim[1] + z_step, z_step, dtype=torch.float32, device=self.device)
         
         X, Y, Z = torch.meshgrid(self.x_vals, self.y_vals, self.z_vals, indexing='ij')
         self.grid = torch.stack((X, Y, Z), axis=-1)
@@ -87,11 +120,11 @@ class PyTorchStereoCorrel(nn.Module):
         xyz_gcs_1 = torch.cat([points_3d, ones], dim=1)
         rt_matrix = torch.cat([r, t], dim=1) 
         torch.cat([rt_matrix, torch.tensor([[0, 0, 0, 1]], device=self.device)], dim=0)
-        xyz_ccs = torch.matmul(rt_matrix, xyz_gcs_1.T.to(torch.double)).T
+        xyz_ccs = torch.matmul(rt_matrix, xyz_gcs_1.T.to(torch.float32)).T
         
         zc = xyz_ccs[:, 2]
         valid_mask = zc > self.epsilon
-        uv_points = torch.full((num_points, 2), -1.0, device=self.device, dtype=torch.double)
+        uv_points = torch.full((num_points, 2), -1.0, device=self.device, dtype=torch.float32)
         
         if torch.any(valid_mask):
             xn = xyz_ccs[valid_mask, 0] / zc[valid_mask]
@@ -168,13 +201,13 @@ class PyTorchStereoCorrel(nn.Module):
         IX_centers, IY_centers = IX_centers.ravel(), IY_centers.ravel()
         Nc_for_xy_plane = IX_centers.shape[0]
 
-        corr_map_overall_z = torch.full((Nc_for_xy_plane, Nz_total), -torch.inf, device=self.device, dtype=torch.double)
+        corr_map_overall_z = torch.full((Nc_for_xy_plane, Nz_total), -torch.inf, device=self.device, dtype=torch.float32)
 
         for z0_idx in range(0, Nz_total, Nz_block_voxels):
             z1_idx = min(z0_idx + Nz_block_voxels, Nz_total)
             # print(f"[Z-SEGMENT] Processando Z-slice: índices {z0_idx} a {z1_idx-1}")
             
-            grid_slice = self.grid[:, :, z0_idx:z1_idx, :].to(torch.double)
+            grid_slice = self.grid[:, :, z0_idx:z1_idx, :].to(torch.float32)
             current_Nz_in_slice = grid_slice.shape[2]
 
             grid_flat_xy = grid_slice.permute(2,0,1,3).reshape(current_Nz_in_slice, Nx*Ny, 3)
@@ -209,64 +242,37 @@ class PyTorchStereoCorrel(nn.Module):
                 corr_map_overall_z[:, z0_idx + z_local_idx] = corr_slice
 
         if method == 'fringe':
-            corr_map_overall_z= torch.nan_to_num(corr_map_overall_z, nan=100)
-            corr_overall, z_best_indices_overall = torch.min(corr_map_overall_z, dim=1)
+            corr_overall, z_best_indices_overall = torch.min(torch.nan_to_num(corr_map_overall_z, nan=1), dim=1)
+            z_best_values_overall = self.z_vals[z_best_indices_overall]
         else:
-            corr_map_overall_z = torch.nan_to_num(corr_map_overall_z, nan=0)
-            corr_overall, z_best_indices_overall = torch.max(corr_map_overall_z, dim=1)
-
-        z_best_values_overall = self.z_vals[z_best_indices_overall]
+            corr_overall, z_best_indices_overall = torch.max(torch.nan_to_num(corr_map_overall_z, nan=0), dim=1)
+            z_best_values_overall = self.z_vals[z_best_indices_overall]
         
 
         x_coords_final = self.x_vals[IX_centers]
         y_coords_final = self.y_vals[IY_centers]
         
-        xyz_final = torch.stack([x_coords_final, y_coords_final, z_best_values_overall], dim=1).to(torch.double)
+        xyz_final = torch.stack([x_coords_final, y_coords_final, z_best_values_overall], dim=1).to(torch.float32)
+
+        # Project final points to both image planes and check bounds
 
         return xyz_final, corr_overall, z_best_indices_overall
 
-    def mask_points(self, xyz_gpu: torch.Tensor, corr_gpu: torch.Tensor, bounds, method='correl') -> Tuple[torch.Tensor, torch.Tensor]:
-
-        uv_left_final, uv_left_final_mask = self.transform_gcs2ccs(xyz_gpu, 'left', image_shape=self.left_images.shape[1:])
-        uv_right_final, uv_right_final_mask = self.transform_gcs2ccs(xyz_gpu, 'right', image_shape=self.right_images.shape[1:])
-        L_interp, R_interp = self.interpolate_images(self.left_images, uv_left_final), self.interpolate_images(self.right_images, uv_right_final)
-        print('inter shape: {}, uv shape: {}'.format(L_interp.shape, uv_left_final.shape))
-        if method == 'fringe':
-            std_mask = (L_interp[:,1]> bounds) & (R_interp[:,1] > bounds)
-        else:
-            L_std, R_std = L_interp.std(dim=1), R_interp.std(dim=1)
-            std_mask = (bounds < L_std) & (bounds < R_std)
-
-        print('mask: {}, std: {}'.format(uv_left_final_mask.shape, std_mask.shape))
-        combined_mask = std_mask
-        xyz_masked = xyz_gpu[combined_mask]
-        corr_masked = corr_gpu[combined_mask]
-
-
-        return xyz_masked, corr_masked
-    
-    def filter_sparse_points(self, xyz_gpu: torch.Tensor, corr_gpu: torch.Tensor, min_neighbors: int = 5, radius: float = 10.0) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Filtra pontos 3D esparsos com base na densidade de vizinhos.
-
-        Args:
-            xyz_gpu (torch.Tensor): Tensor com as coordenadas (N, 3) dos pontos.
-            corr_gpu (torch.Tensor): Tensor com os valores de correlação (N,).
-            min_neighbors (int): Número mínimo de vizinhos em um raio para um ponto ser mantido.
-            radius (float): O raio para a busca de vizinhos.
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Um par de tensores (xyz, corr) contendo apenas os pontos densos.
+    def get_cropped_image_bounds(self, image_shape, crop_factor: float):
         """
-        if xyz_gpu.numel() == 0:
-            return xyz_gpu, corr_gpu
-        
-        xyz_cpu = xyz_gpu.cpu().numpy()
-        tree = cKDTree(xyz_cpu)
-    
-        neighbor_counts = tree.query_ball_point(xyz_cpu, r=radius, return_length=True)
-        dense_mask = neighbor_counts >= min_neighbors
-
-        return xyz_gpu[dense_mask], corr_gpu[dense_mask]
+        Returns the bounds (ymin, ymax, xmin, xmax) for a crop centered in the image.
+        crop_factor: float in (0, 1], e.g. 0.5 means crop to 50% of original size.
+        """
+        H, W = image_shape
+        crop_H = int(H * crop_factor)
+        crop_W = int(W * crop_factor)
+        center_y = H // 2
+        center_x = W // 2
+        ymin = max(center_y - crop_H // 2, 0)
+        ymax = min(center_y + crop_H // 2, H)
+        xmin = max(center_x - crop_W // 2, 0)
+        xmax = min(center_x + crop_W // 2, W)
+        return ymin, ymax, xmin, xmax
 
     def std_mask_points(self, xyz_gpu: torch.Tensor, corr_gpu: torch.Tensor, bounds, method='correl') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 

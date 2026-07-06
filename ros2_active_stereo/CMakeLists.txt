@@ -24,10 +24,19 @@ find_package(X11 REQUIRED)
 
 
 # Manually specify the path to gpiod
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GPIOD REQUIRED libgpiod)
-include_directories(${GPIOD_INCLUDE_DIRS})
-link_directories(${GPIOD_LIBRARY_DIRS})
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    message(STATUS "ARM64 architecture detected. Enabling libgpiod...")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GPIOD REQUIRED libgpiod)
+    include_directories(${GPIOD_INCLUDE_DIRS})
+    link_directories(${GPIOD_LIBRARY_DIRS})
+
+    add_executable(gpio_control src/gpio_control.cpp)
+    target_link_libraries(gpio_control ${GPIOD_LIBRARIES} "${cpp_typesupport_target}")
+    ament_target_dependencies(gpio_control rclcpp std_msgs std_srvs ros2_active_stereo_msgs)
+
+    install(TARGETS gpio_control DESTINATION lib/${PROJECT_NAME})
+endif()
 
 # # Manually specify the path to libnoise
 # set(LIBNOISE_INCLUDE_DIRS "/usr/local/include")
@@ -58,9 +67,7 @@ target_link_libraries(image_project_comp
   ${OpenCV_LIBS}
 )
 
-add_executable(gpio_control src/gpio_control.cpp)
-target_link_libraries(gpio_control ${GPIOD_LIBRARIES} "${cpp_typesupport_target}")
-ament_target_dependencies(gpio_control rclcpp std_msgs std_srvs ros2_active_stereo_msgs)
+
 
 add_library(stereo_fringe_comp SHARED
   src/stereo_fringe.cpp
@@ -92,7 +99,6 @@ install(TARGETS
       image_project_comp
       stereo_fringe_comp
       stereo_correl_comp
-      gpio_control
       ARCHIVE DESTINATION lib
       LIBRARY DESTINATION lib
       RUNTIME DESTINATION lib/${PROJECT_NAME}

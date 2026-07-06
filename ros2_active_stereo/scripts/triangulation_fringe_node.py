@@ -45,12 +45,11 @@ class TriangulationNode(Node):
         self.declare_parameter('save_filename', 'fringe_points')
         self.declare_parameter('camera_frame_id', '/Active/left_camera_link')
         self.declare_parameter('zval', 300)
+        self.declare_parameter('neighbours', 15)
+        self.declare_parameter('radius', 12)
 
         self.zmin = -self.get_parameter('zval').value
         self.zmax = self.get_parameter('zval').value
-        # KDTree parameters
-        self.declare_parameter('neighbours', 15)
-        self.declare_parameter('radius', 12)
 
         self.images = {
         'sync/left/phase_map': None,
@@ -65,14 +64,11 @@ class TriangulationNode(Node):
         # Services
         self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
         self.phase_process = self.create_client(Trigger, 'phase_process')
-        # while not self.phase_process.wait_for_service(timeout_sec=1.0):
-        #         self.get_logger().info('Service not available, waiting again ...')
-
 
         self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, 10)
 
-        self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         # Torch class
+        self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         self.zscan = PyTorchStereoCorrel(yaml_file=self.yaml_file)
         self.get_logger().info("Node 'triangulation_node' criado")
 
@@ -123,23 +119,27 @@ class TriangulationNode(Node):
         self.triangulation()
 
     def triangulation(self):
-        self.get_logger().info(f'Z range: ({self.zmin:.2f}, {self.zmax:.2f})')
-
+        """
+            Function to perform spatial correlation
+        """
+        
         self.get_logger().info("Starting triangulation process.")
         t0 = time.time()
         
         # Get filter points parameters
-        mod_tresh = self.get_parameter('mod_thresh').value
-        rad_tresh = self.get_parameter('rad_tresh').value
-        radius = self.get_parameter('radius').value
-        min_neighbors = self.get_parameter('neighbours').value
-        save_points = self.get_parameter('debug_save_points').value
+        mod_tresh = self.get_parameter('mod_thresh').get_parameter_value().double_value
+        rad_tresh = self.get_parameter('rad_tresh').get_parameter_value().double_value
+        radius = self.get_parameter('radius').get_parameter_value().double_value
+        min_neighbours = self.get_parameter('neighbours').get_parameter_value().integer_value
+        save_points = self.get_parameter('debug_save_points').get_parameter_value().bool_value
         filename = self.get_parameter('save_filename').get_parameter_value().string_value
 
 
         GRID_LIMITS = {'x': (-100, 500), 'y': (-100, 400), 'z': (self.zmin, self.zmax)}
-        GRID_STEPS_1 = {'xy': 2.0, 'z': 2} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 2.0, 'z': 1} # second steps of 3d patch
+        GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
+        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.5} # second steps of 3d patch
+        
+        self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
 
         self.zscan.points3d(x_lim=GRID_LIMITS['x'], y_lim=GRID_LIMITS['y'], z_lim=GRID_LIMITS['z'],
                             xy_step=GRID_STEPS_1['xy'], z_step=GRID_STEPS_1['z'])
@@ -149,19 +149,19 @@ class TriangulationNode(Node):
         filter_mask = corr_gpu < rad_tresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu = self.zscan.mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
+        xyz_filtered_gpu, corr_filtered_gpu = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
 
         # clean points based on neighbours
-        # final_xyz_gpu, _ = self.zscan.filter_sparse_points( xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu,min_neighbors=min_neighbors, radius=radius)
+        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
         
 
         if xyz_filtered_gpu.numel() == 0:
             self.get_logger().warning("No points found")
             return
         
-        self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_gpu.shape[0]}')
-        t0 = time.time()
-        self.publish_pointcloud(xyz_filtered_gpu.cpu().numpy())
+        # self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_gpu.shape[0]}')
+        # t0 = time.time()
+        # self.publish_pointcloud(xyz_filtered_gpu.cpu().numpy())
         
         # Find first 3D bounds to refined process               
         xlim = torch.min(xyz_filtered_gpu[:, 0]), torch.max(xyz_filtered_gpu[:, 0])
@@ -183,15 +183,18 @@ class TriangulationNode(Node):
         filter_mask = corr_gpu < rad_tresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu = self.zscan.mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
+        xyz_filtered_gpu, corr_filtered_gpu = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
+        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
+
+
+        # Publicar os pontos refinados
+        self.get_logger().info(f'2nd Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
+        self.publish_pointcloud(final_xyz_gpu.cpu().numpy())
 
         if save_points:
             # Salvar os pontos refinados em um arquivo .txt
-            np.savetxt('{}_{}.txt'.format(time.strftime("%Y%m%d"), filename), xyz_filtered_gpu.cpu().numpy(), fmt='%.6f')
+            np.savetxt('{}_{}.txt'.format(time.strftime("%Y%m%d"), filename), final_xyz_gpu.cpu().numpy(), fmt='%.6f')
 
-        # Publicar os pontos refinados
-        self.get_logger().info(f'2nd Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_filtered_gpu.shape[0]}')
-        self.publish_pointcloud(xyz_filtered_gpu.cpu().numpy())
         self.process_triang = False
    
     def publish_pointcloud(self, points):
