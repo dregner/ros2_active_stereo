@@ -30,8 +30,8 @@ public:
         count_= 0;
 
         // pastas na RAM onde ficam salvas as imagens
-        std::filesystem::create_directories("/dev/shm/stereo_correl/left");
-        std::filesystem::create_directories("/dev/shm/stereo_correl/right");
+        std::filesystem::create_directories("/tmp/rrp_stereo/left");
+        std::filesystem::create_directories("/tmp/rrp_stereo/right");
 
         // parametros
         this->declare_parameter<int>("num_images",10);
@@ -162,7 +162,7 @@ private:
                 return;
             }
 
-            std::string base_path = "/dev/shm/stereo_active/";
+            std::string base_path = "/tmp/rrp_stereo/";
             char left_filename[256], right_filename[256];
             
             

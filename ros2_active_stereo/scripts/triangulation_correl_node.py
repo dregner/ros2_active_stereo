@@ -33,16 +33,16 @@ class InverseTriangulationNode(Node):
         self.declare_parameter('climp', 5.0)
         self.declare_parameter('window_size', 3)
         self.declare_parameter('stride', 1)
-        self.declare_parameter('threshold', 0.65)
-        self.declare_parameter('std_thresh', 10)
-        self.declare_parameter('radius', 15.0)
+        self.declare_parameter('threshold', 0.7)
+        self.declare_parameter('std_thresh', 20)
+        self.declare_parameter('radius', 10)
         self.declare_parameter('neighbours', 5)
-        self.declare_parameter('crop_image_factor', 0.85)
+        self.declare_parameter('crop_image_factor', 0.9)
         self.declare_parameter('save_filename', "correlation_points")
         self.declare_parameter('debug_save_points', False)
         self.declare_parameter('n_images', 10)
         self.declare_parameter('camera_frame_id', 'SM3/left_camera_link')
-        self.declare_parameter('zval', 500)
+        self.declare_parameter('zval', 300)
 
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         self.num_images = self.get_parameter('n_images').get_parameter_value().integer_value
@@ -60,7 +60,7 @@ class InverseTriangulationNode(Node):
         self.handshake_images_sub = self.create_subscription(Int16, 'handshake_images', self.handshake_images_cb, 10)
         
         # Initialize the publisher
-        self.pcl_publisher = self.create_publisher(PointCloud2, 'pointcloud', 10)
+        self.pointcloud_publisher = self.create_publisher(PointCloud2, 'pointcloud', 10)
 
         self.perform_correl = False
 
@@ -77,7 +77,7 @@ class InverseTriangulationNode(Node):
         #self.get_logger().info(f"Handshake do c++ concluido, num_images= {msg.data}")
         self.num_images = abs(msg.data)         # verifica o sinal do numero de img recebido para definir se realiza a correlacao
         self.perform_correl = msg.data > 0
-        base_path = '/dev/shm/stereo_active/'
+        base_path = '/tmp/rrp_stereo'
 
         self.left_images = []
         self.right_images = []
@@ -138,12 +138,12 @@ class InverseTriangulationNode(Node):
         self.get_logger().info("Starting triangulation process.")
         t0 = time.time()
         # Get filter points parameters
-        std_thresh = self.get_parameter('std_thresh').get_parameter_value().double_value
+        std_thresh = self.get_parameter('std_thresh').get_parameter_value().integer_value
         correl_thresh = self.get_parameter('threshold').get_parameter_value().double_value
         win_size = self.get_parameter('window_size').get_parameter_value().integer_value
         stride = self.get_parameter('stride').get_parameter_value().integer_value
 
-        radius = self.get_parameter('radius').get_parameter_value().double_value
+        radius = self.get_parameter('radius').get_parameter_value().integer_value
         min_neighbours = self.get_parameter('neighbours').get_parameter_value().integer_value
         save_points = self.get_parameter('debug_save_points').get_parameter_value().bool_value
         filename = self.get_parameter('save_filename').get_parameter_value().string_value
@@ -151,7 +151,7 @@ class InverseTriangulationNode(Node):
 
         GRID_LIMITS = {'x': (-100, 500), 'y': (-100, 400), 'z': (self.zmin, self.zmax)}
         GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 1.0, 'z': 1.0} # second steps of 3d patch
+        GRID_STEPS_2 = {'xy': 0.5, 'z': 1.0} # second steps of 3d patch
         # GRID_STEPS_3= {'xy': 1.0, 'z': 0.01} # second steps of 3d patch
 
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
@@ -162,18 +162,20 @@ class InverseTriangulationNode(Node):
         xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=win_size, Ky=win_size, stride=stride, Nz_block_voxels=10, method='correl')
 
         # filter points based on difference value in radians
-        filter_mask = corr_gpu > correl_thresh
+        filter_mask = corr_gpu > 0.6
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.mask_uv_points(xyz_filtered_gpu, corr_filtered_gpu, crop_factor=crop_factor)
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=std_thresh, method='correl')
         # clean points based on neighbours
         final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
-        # final_xyz_gpu = xyz_filtered_gpu
+        
         if final_xyz_gpu.numel() == 0:
             self.get_logger().warning("No points found")
             return
-        
+
+        self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
+        self.publish_pointcloud(final_xyz_gpu.cpu().numpy())
         # Find first 3D bounds to refined process               
         xlim = torch.min(final_xyz_gpu[:, 0]), torch.max(final_xyz_gpu[:, 0])
         ylim = torch.min(final_xyz_gpu[:, 1]), torch.max(final_xyz_gpu[:, 1])
@@ -196,7 +198,7 @@ class InverseTriangulationNode(Node):
         corr_filtered_gpu = corr_gpu[filter_mask]
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.mask_uv_points(xyz_filtered_gpu, corr_filtered_gpu, crop_factor=crop_factor)
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=std_thresh, method='correl')
-        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
+        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours*2, radius=radius/2)
 
         self.get_logger().info(f'2nd Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
         self.publish_pointcloud(final_xyz_gpu.cpu().numpy())

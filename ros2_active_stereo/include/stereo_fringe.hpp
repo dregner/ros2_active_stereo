@@ -44,6 +44,9 @@ private:
     
     void process_srv_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
                     const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+                    
+    void save_img_srv_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                    const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void construct_window();
     void project_image_timer_cb();
 
@@ -100,6 +103,7 @@ private:
     // Service and clients
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr change_image_service_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr process_service_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr save_imgs_service_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr trigger_client_;
 
     // Projection timer callback

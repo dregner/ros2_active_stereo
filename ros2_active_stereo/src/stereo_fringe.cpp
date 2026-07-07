@@ -14,7 +14,7 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
     this->declare_parameter("camera_hz", 20);
     this->declare_parameter("skip_trigger", 3);
     this->declare_parameter("save_path", "/tmp/structured-light");
-    this->declare_parameter("save_image", false);
+    this->declare_parameter("save_image", true);
     this->declare_parameter("debug", true);
 
     // Structured light params to class
@@ -51,28 +51,30 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
 
     //Subscrbers Quality of Service
     auto qos = rclcpp::SensorDataQoS();
+    qos.keep_last(15);
     rclcpp::SubscriptionOptions sub_options;    
 
     // Subscribers
     sub_left_.subscribe(this, "left/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sub_right_.subscribe(this, "right/image_raw", qos.get_rmw_qos_profile(), sub_options);
-    sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(1), sub_left_, sub_right_);
+    sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(SyncPolicy(15), sub_left_, sub_right_);
     sync_->registerCallback(std::bind(&StereoFringeProcess::stereo_callback, this, std::placeholders::_1, std::placeholders::_2));
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", 10, std::bind(&StereoFringeProcess::camera_info_cb, this, std::placeholders::_1));
 
     //Publisher 64F images
-    pub_abs_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/phase_map", 10);
-    pub_abs_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/phase_map", 10);
-    pub_mod_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/modulation_map", 10);
-    pub_mod_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/modulation_map", 10);
+    pub_abs_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/phase_map", 2);
+    pub_abs_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/phase_map", 2);
+    pub_mod_left_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/modulation_map", 2);
+    pub_mod_right_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/modulation_map", 2);
     // Publihser debug images
-    pub_abs_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/phase_map", 10);
-    pub_abs_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/phase_map", 10);
+    pub_abs_left_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/phase_map", 2);
+    pub_abs_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/phase_map", 2);
 
 
     // Services
     change_image_service_ = this->create_service<std_srvs::srv::SetBool>("image_project",  std::bind(&StereoFringeProcess::project_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
     process_service_ = this->create_service<std_srvs::srv::Trigger>("phase_process", std::bind(&StereoFringeProcess::process_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
+    save_imgs_service_ = this->create_service<std_srvs::srv::Trigger>("save_image", std::bind(&StereoFringeProcess::save_img_srv_cb, this, std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default );
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>("trigger", rmw_qos_profile_default, srv_cb_group_);
 
     // Timer callback for projection
@@ -202,14 +204,17 @@ void StereoFringeProcess::project_image_timer_cb()
         }
     }
       
-    if(this->get_parameter("save_image").as_bool()){
-        if(fringe_process_ptr_->save_images(this->get_parameter("save_path").as_string())){
-            RCLCPP_INFO(this->get_logger(), "Save images on %s", this->get_parameter("save_path").as_string().c_str());
-        }else{ RCLCPP_ERROR(this->get_logger(), "Failed to save images");}
-    }
 }
 
-/*Bool Project service callback, False: reset, true: start process*/
+void StereoFringeProcess::save_img_srv_cb(const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+                    const std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    if(fringe_process_ptr_->save_images(this->get_parameter("save_path").as_string())){
+        RCLCPP_INFO(this->get_logger(), "Save images on %s", this->get_parameter("save_path").as_string().c_str());
+    }
+    else{ RCLCPP_ERROR(this->get_logger(), "Failed to save images");}
+}
+
 void StereoFringeProcess::project_cb(const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
                          const std::shared_ptr<std_srvs::srv::SetBool::Response> response)
 {
@@ -270,8 +275,8 @@ void StereoFringeProcess::stereo_callback(const sensor_msgs::msg::Image::ConstSh
             cv::Mat left = cv_bridge::toCvShare(left_msg, "mono8")->image;
             cv::Mat right = cv_bridge::toCvShare(right_msg, "mono8")->image;
 
-            RCLCPP_INFO(this->get_logger(), "Processing pattern %d / %zu", 
-                        n_proj_, all_imgs_.size());
+            // RCLCPP_INFO(this->get_logger(), "Processing pattern %d / %zu", 
+            //             n_proj_, all_imgs_.size());
 
             // Armazena no buffer do fringe_process
             if (n_proj_ != 0){
@@ -279,13 +284,11 @@ void StereoFringeProcess::stereo_callback(const sensor_msgs::msg::Image::ConstSh
             }
             receive_imgs_ = true;
             
-            trigger_timer_ = 0;
-
             if (static_cast<size_t>(n_proj_) >= all_imgs_.size()) {
                 process_ = false;
                 project_imgs_ = false;
                 n_proj_ = 0;
-                RCLCPP_INFO(this->get_logger(), "Sequência completa! Iniciando salvamento...");
+                // RCLCPP_INFO(this->get_logger(), "Sequência completa! Iniciando salvamento...");
                 std::vector<cv::Mat> process_result;
                 bool debug = this->get_parameter("debug").as_bool();
                 process_result = fringe_process_ptr_->calculate_abs_phi_images(debug);
@@ -360,13 +363,20 @@ void StereoFringeProcess::publish_processed_images(std::vector<cv::Mat> images)
 // Auxiliar function for trigger
 void StereoFringeProcess::send_trigger()
 {
-    auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-    trigger_client_->async_send_request(
-        request,
-        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
-            this->trigger_callback(future);
+    auto trigger_request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    auto future_trigger = trigger_client_->async_send_request(trigger_request);
+    if (future_trigger.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready){
+
+        auto result_trigger = future_trigger.get();
+
+        if(result_trigger->success){
+            rclcpp::sleep_for(std::chrono::milliseconds(10)); // espera o time exposition da foto + tempo extra
         }
-    );
+
+    }else{
+        RCLCPP_ERROR(this->get_logger(), "Trigger service call timed out!");
+        return;
+    }
 }
 
 // Trigger callback

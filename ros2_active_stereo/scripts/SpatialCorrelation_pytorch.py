@@ -351,6 +351,7 @@ class PyTorchStereoCorrel(nn.Module):
             # Opcional: Limpa a memória para liberar a GPU
             del dist_batch, mask_dist, neighbors_count, mask_neighbors
             torch.cuda.empty_cache()
+            
         if corr_gpu is None and interp is None:
             return xyz_gpu[final_mask], None, None
         
@@ -362,3 +363,26 @@ class PyTorchStereoCorrel(nn.Module):
         else:
             # Aplica a máscara final aos tensores originais
             return xyz_gpu[final_mask], corr_gpu[final_mask], interp[final_mask]
+
+    def filter_sparse_points(self, xyz_gpu: torch.Tensor, corr_gpu: torch.Tensor, min_neighbors: int = 5, radius: float = 10.0) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Filtra pontos 3D esparsos com base na densidade de vizinhos.
+
+        Args:
+            xyz_gpu (torch.Tensor): Tensor com as coordenadas (N, 3) dos pontos.
+            corr_gpu (torch.Tensor): Tensor com os valores de correlação (N,).
+            min_neighbors (int): Número mínimo de vizinhos em um raio para um ponto ser mantido.
+            radius (float): O raio para a busca de vizinhos.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Um par de tensores (xyz, corr) contendo apenas os pontos densos.
+        """
+        if xyz_gpu.numel() == 0:
+            return xyz_gpu, corr_gpu
+        
+        xyz_cpu = xyz_gpu.cpu().numpy()
+        tree = cKDTree(xyz_cpu)
+    
+        neighbor_counts = tree.query_ball_point(xyz_cpu, r=radius, return_length=True)
+        dense_mask = neighbor_counts >= min_neighbors
+
+        return xyz_gpu[dense_mask], corr_gpu[dense_mask]

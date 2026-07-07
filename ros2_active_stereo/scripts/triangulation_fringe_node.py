@@ -39,17 +39,17 @@ class TriangulationNode(Node):
 
         # Parameters
         self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_fringe_projection/params/SM4.yaml')
-        self.declare_parameter('mod_thresh', 50) #cupy 0.07. torch (0-255)
-        self.declare_parameter('rad_tresh', 0.06) #threshold for radian difference
+        self.declare_parameter('mod_thresh', 30) #cupy 0.07. torch (0-255)
+        self.declare_parameter('rad_tresh', 0.1) #threshold for radian difference
         self.declare_parameter('debug_save_points', False)
         self.declare_parameter('save_filename', 'fringe_points')
         self.declare_parameter('camera_frame_id', '/Active/left_camera_link')
-        self.declare_parameter('zval', 300)
-        self.declare_parameter('neighbours', 15)
-        self.declare_parameter('radius', 12)
+        self.declare_parameter('zval', 400)
+        self.declare_parameter('neighbours', 5)
+        self.declare_parameter('radius', 10)
 
-        self.zmin = -self.get_parameter('zval').value
-        self.zmax = self.get_parameter('zval').value
+        self.zmin = -self.get_parameter('zval').get_parameter_value().integer_value
+        self.zmax = self.get_parameter('zval').get_parameter_value().integer_value
 
         self.images = {
         'sync/left/phase_map': None,
@@ -114,8 +114,10 @@ class TriangulationNode(Node):
         # TORCH
         left_images = np.asarray([self.images['sync/left/phase_map'], self.images['sync/left/modulation_map']])
         right_images = np.asarray([self.images['sync/right/phase_map'], self.images['sync/right/modulation_map']])
+        self.get_logger().info(f'Min and max modulation values: Left: {np.min(left_images[1])}, {np.max(left_images[1])}; Right: {np.min(right_images[1])}, {np.max(right_images[1])}')
+        self.get_logger().info(f'Image shape before processing: {left_images.shape}, {right_images.shape}')
         self.zscan.convert_images(left_images, right_images, apply_clahe=False, undist=True)
-
+        self.get_logger().info(f'Image shape after processing: {self.zscan.left_images.shape}, {self.zscan.right_images.shape}')
         self.triangulation()
 
     def triangulation(self):
@@ -127,9 +129,9 @@ class TriangulationNode(Node):
         t0 = time.time()
         
         # Get filter points parameters
-        mod_tresh = self.get_parameter('mod_thresh').get_parameter_value().double_value
+        mod_tresh = self.get_parameter('mod_thresh').get_parameter_value().integer_value
         rad_tresh = self.get_parameter('rad_tresh').get_parameter_value().double_value
-        radius = self.get_parameter('radius').get_parameter_value().double_value
+        radius = self.get_parameter('radius').get_parameter_value().integer_value
         min_neighbours = self.get_parameter('neighbours').get_parameter_value().integer_value
         save_points = self.get_parameter('debug_save_points').get_parameter_value().bool_value
         filename = self.get_parameter('save_filename').get_parameter_value().string_value
@@ -137,11 +139,11 @@ class TriangulationNode(Node):
 
         GRID_LIMITS = {'x': (-100, 500), 'y': (-100, 400), 'z': (self.zmin, self.zmax)}
         GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.5} # second steps of 3d patch
+        GRID_STEPS_2 = {'xy': 1.0, 'z': 1.0} # second steps of 3d patch
         
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
 
-        self.zscan.points3d(x_lim=GRID_LIMITS['x'], y_lim=GRID_LIMITS['y'], z_lim=GRID_LIMITS['z'],
+        self.zscan.points3d(x_lim=GRID_LIMITS['x'], y_lim   =GRID_LIMITS['y'], z_lim=GRID_LIMITS['z'],
                             xy_step=GRID_STEPS_1['xy'], z_step=GRID_STEPS_1['z'])
                         
         xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=20, method='fringe')
@@ -149,29 +151,27 @@ class TriangulationNode(Node):
         filter_mask = corr_gpu < rad_tresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
-
-        # clean points based on neighbours
-        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
-        
+        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
+        xyz_filtered_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
 
         if xyz_filtered_gpu.numel() == 0:
             self.get_logger().warning("No points found")
             return
         
-        # self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_gpu.shape[0]}')
-        # t0 = time.time()
+        self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_filtered_gpu.shape[0]}')
+        t0 = time.time()
         # self.publish_pointcloud(xyz_filtered_gpu.cpu().numpy())
         
         # Find first 3D bounds to refined process               
         xlim = torch.min(xyz_filtered_gpu[:, 0]), torch.max(xyz_filtered_gpu[:, 0])
         ylim = torch.min(xyz_filtered_gpu[:, 1]), torch.max(xyz_filtered_gpu[:, 1])
         zlim = torch.min(xyz_filtered_gpu[:, 2]), torch.max(xyz_filtered_gpu[:, 2])
-        
+
+        # self.get_logger().info(f'3D bounds for refined triangulation: X: {xlim}, Y: {ylim}, Z: {zlim}')
         if zlim[0] == zlim[1]:
             self.get_logger().info("Z are same")
-            zlim[0] = zlim[0] - 5
-            zlim[1] = zlim[1] + 5
+            zlim[0] = zlim[0] - 10
+            zlim[1] = zlim[1] + 10
 
         # Construct second 3d points
         self.zscan.points3d(x_lim=xlim, y_lim=ylim, z_lim=zlim, 
@@ -183,7 +183,7 @@ class TriangulationNode(Node):
         filter_mask = corr_gpu < rad_tresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
+        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
         final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
 
 
@@ -237,8 +237,6 @@ class TriangulationNode(Node):
             data=pointcloud_data,
             is_dense=True
         )
-    
-
 
     def z_limits_global(self, points):
 

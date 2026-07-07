@@ -56,10 +56,15 @@ def generate_launch_description():
                 default_value='disparity/pointcloud',
                 description='Topic name for the disparity point cloud'
             ),
-            DeclareLaunchArgument(
+        DeclareLaunchArgument(
                 'triangulated_pointcloud',
                 default_value='triangulated/pointcloud',
                 description='Topic name for the triangulated point cloud'
+            ),
+        DeclareLaunchArgument(
+                'zval',
+                default_value='300',
+                description='Z value for triangulation'
             ),
 
         Node(
@@ -74,7 +79,7 @@ def generate_launch_description():
                     'camera_frame_id': LaunchConfiguration('camera_frame_id'),
                     'neightbours': LaunchConfiguration('neighbours'),
                     'radius': LaunchConfiguration('radius'),
-                    'zval': 300,
+                    'zval': LaunchConfiguration('zval'),
                 }],
                 remappings=[
                     ('abs_phi_left', 'sync/left/phase_map'),

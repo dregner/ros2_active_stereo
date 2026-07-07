@@ -42,6 +42,21 @@ def generate_launch_description():
                 default_value='Active/left_camera_link',
                 description='Camera frame ID'
             ),
+            DeclareLaunchArgument(
+                'correl_thresh',
+                default_value='0.7',
+                description='Correlation threshold'
+            ),
+            DeclareLaunchArgument(
+                'std_thresh',
+                default_value='20',
+                description='Standard deviation threshold'
+            ),
+            DeclareLaunchArgument(
+                'zval',
+                default_value='400',
+                description='Z value for triangulation'
+            ),
             Node(
                 package='ros2_active_stereo',
                 executable='triangulation_correl_node.py',
@@ -52,7 +67,10 @@ def generate_launch_description():
                     {'num_images': LaunchConfiguration('n_images'),
                      'yaml_path': LaunchConfiguration('yaml_path'),
                      'window_size': LaunchConfiguration('window_size'),
-                     'camera_frame_id': LaunchConfiguration('camera_frame_id')}
+                     'camera_frame_id': LaunchConfiguration('camera_frame_id'),
+                     'threshold': LaunchConfiguration('correl_thresh'),
+                     'std_thresh': LaunchConfiguration('std_thresh'),
+                     'zval': LaunchConfiguration('zval')}
                 ],
                 remappings=[
                     ('pointcloud', LaunchConfiguration('point_cloud')),
