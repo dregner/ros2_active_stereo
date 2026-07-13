@@ -16,7 +16,7 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
     this->declare_parameter("save_path", "/tmp/structured-light");
     this->declare_parameter("save_image", true);
     this->declare_parameter("debug", true);
-
+    this->declare_parameter("trigger_delay", 4);
     // Structured light params to class
     pixel_per_fringe = this->get_parameter("pixel_per_fringe").as_int();
     fringe_steps = this->get_parameter("fringe_steps").as_int();
@@ -51,7 +51,7 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
 
     //Subscrbers Quality of Service
     auto qos = rclcpp::SensorDataQoS();
-    qos.keep_last(15);
+    qos.keep_last(2);
     rclcpp::SubscriptionOptions sub_options;    
 
     // Subscribers
@@ -148,7 +148,7 @@ void StereoFringeProcess::project_image_timer_cb()
     int px_f = this->get_parameter("pixel_per_fringe").as_int();
     int steps = this->get_parameter("fringe_steps").as_int();
     color_ = this->get_parameter("image_color").as_string();
-
+    int delay = this->get_parameter("trigger_delay").as_int();
     // Check if camera info msg has been received
     if (!receive_camera_info_) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
@@ -188,15 +188,17 @@ void StereoFringeProcess::project_image_timer_cb()
     // Check if can project and n_proj_ is below projection img number
     if (static_cast<size_t>(n_proj_) < all_imgs_.size() && project_imgs_) {
         cv::imshow(window_name_, all_imgs_[n_proj_]);
-        cv::waitKey(10);
+        cv::waitKey(1);
     } else { 
         cv::imshow(window_name_, black_img_);
-        cv::waitKey(10);
+        cv::waitKey(1);
     }
 
     // 2. Send trigger if processing and do not receive
     if (process_){
-        if(!receive_imgs_){ send_trigger();} 
+        if(!receive_imgs_){ 
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            send_trigger();} 
         else{ 
             receive_imgs_ = false; 
             skip_frames_ = this->get_parameter("skip_trigger").as_int(); 
@@ -363,20 +365,22 @@ void StereoFringeProcess::publish_processed_images(std::vector<cv::Mat> images)
 // Auxiliar function for trigger
 void StereoFringeProcess::send_trigger()
 {
-    auto trigger_request = std::make_shared<std_srvs::srv::Trigger::Request>();
-    auto future_trigger = trigger_client_->async_send_request(trigger_request);
-    if (future_trigger.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready){
-
-        auto result_trigger = future_trigger.get();
-
-        if(result_trigger->success){
-            rclcpp::sleep_for(std::chrono::milliseconds(10)); // espera o time exposition da foto + tempo extra
-        }
-
-    }else{
-        RCLCPP_ERROR(this->get_logger(), "Trigger service call timed out!");
+// Check if client is ready to avoid crashing
+    if (!trigger_client_->service_is_ready()) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Trigger service not ready!");
         return;
     }
+
+    auto trigger_request = std::make_shared<std_srvs::srv::Trigger::Request>();
+    
+    // Send request asynchronously with a callback handler, ZERO BLOCKING
+    trigger_client_->async_send_request(trigger_request,
+        [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+            auto response = future.get();
+            if (!response->success) {
+                RCLCPP_ERROR(this->get_logger(), "Hardware trigger failed!");
+            }
+        });
 }
 
 // Trigger callback

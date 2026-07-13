@@ -114,10 +114,7 @@ class TriangulationNode(Node):
         # TORCH
         left_images = np.asarray([self.images['sync/left/phase_map'], self.images['sync/left/modulation_map']])
         right_images = np.asarray([self.images['sync/right/phase_map'], self.images['sync/right/modulation_map']])
-        self.get_logger().info(f'Min and max modulation values: Left: {np.min(left_images[1])}, {np.max(left_images[1])}; Right: {np.min(right_images[1])}, {np.max(right_images[1])}')
-        self.get_logger().info(f'Image shape before processing: {left_images.shape}, {right_images.shape}')
         self.zscan.convert_images(left_images, right_images, apply_clahe=False, undist=True)
-        self.get_logger().info(f'Image shape after processing: {self.zscan.left_images.shape}, {self.zscan.right_images.shape}')
         self.triangulation()
 
     def triangulation(self):
