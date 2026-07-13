@@ -21,7 +21,8 @@ find_package(ros2_active_stereo_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV 4.5.4 EXACT)
 find_package(X11 REQUIRED)
-
+find_package(glfw3 REQUIRED)
+find_package(OpenGL REQUIRED)
 
 # Manually specify the path to gpiod
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
@@ -82,7 +83,7 @@ target_include_directories(stereo_fringe_comp PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(stereo_fringe_comp  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport ros2_active_stereo_msgs)
-target_link_libraries(stereo_fringe_comp  ${X11_LIBRARIES}  ${X11_Xinerama_LIB}  ${OpenCV_LIBS})
+target_link_libraries(stereo_fringe_comp  ${X11_LIBRARIES}  ${X11_Xinerama_LIB}  ${OpenCV_LIBS} glfw OpenGL::GL)
 rclcpp_components_register_nodes(stereo_fringe_comp PLUGIN "ros2_active_stereo::StereoFringeProcess" EXECUTABLE stereo_fringe_node)
 
 add_library(stereo_correl_comp SHARED src/stereo_correlation.cpp)

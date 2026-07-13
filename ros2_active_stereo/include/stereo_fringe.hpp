@@ -16,6 +16,8 @@
 #include <opencv2/opencv.hpp>
 #include <monitor_utils.hpp>
 #include <chrono>
+#include <GLFW/glfw3.h>
+
 
 namespace ros2_active_stereo
 {
@@ -62,6 +64,10 @@ private:
     int n_proj_{0};
     int trigger_timer_{0};
     cv::Size project_resolution_;
+
+    // Window and rendering variables
+    GLFWwindow* gl_window_{nullptr};
+    GLuint pattern_texture_id_{0};
 
     bool project_imgs_{false};
     bool process_{false};

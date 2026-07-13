@@ -84,7 +84,12 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
 }
 
 StereoFringeProcess::~StereoFringeProcess() {
-    cv::destroyWindow(window_name_);
+    // cv::destroyWindow(window_name_);
+    if (gl_window_) {
+        glDeleteTextures(1, &pattern_texture_id_);
+        glfwDestroyWindow(gl_window_);
+    }
+    glfwTerminate();
 }
 
 // Process service callback
@@ -138,8 +143,39 @@ bool StereoFringeProcess::get_screen_resolution(const std::string& monitor_name)
 void StereoFringeProcess::construct_window() 
 {
 
-    cv::namedWindow(window_name_, cv::WINDOW_NORMAL);  // allow resizing
-    cv::setWindowProperty(window_name_, cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);  
+    // cv::namedWindow(window_name_, cv::WINDOW_NORMAL);  // allow resizing
+    // cv::setWindowProperty(window_name_, cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);  
+    if (!glfwInit()) {
+        RCLCPP_FATAL(this->get_logger(), "Failed to initialize GLFW presentation subsystem");
+        return;
+    }
+
+    // Configure window for a borderless fullscreen presentation environment
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+
+    // Create window bound to your projection display resolution
+    gl_window_ = glfwCreateWindow(project_resolution_.width, project_resolution_.height, 
+                                  "Projector Frame Lock", NULL, NULL);
+
+    if (!gl_window_) {
+        RCLCPP_FATAL(this->get_logger(), "Failed to create hardware window context");
+        glfwTerminate();
+        return;
+    }
+
+    glfwMakeContextCurrent(gl_window_);
+
+    // HARDWARE LOCK FIX: Enforce a 1:1 match with monitor refresh clock (60Hz)
+    // This forces swapBuffers to block until the hardware updates the frame.
+    glfwSwapInterval(1);
+
+    // Generate an empty GPU texture map slot for rapid picture allocation
+    glGenTextures(1, &pattern_texture_id_);
+    glBindTexture(GL_TEXTURE_2D, pattern_texture_id_);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
 }
 
 /* Timer callback for projecting images */
@@ -157,6 +193,16 @@ void StereoFringeProcess::project_image_timer_cb()
         return;
     }
 
+    glfwMakeContextCurrent(gl_window_);
+
+    // 2. Bound the viewport dynamically to match your window context size
+    int width, height;
+    glfwGetFramebufferSize(gl_window_, &width, &height);
+    glViewport(0, 0, width, height);
+
+    // Clear display buffer safely on each tick
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
     // Check if parameters have been changed
     if(px_f != pixel_per_fringe || steps != fringe_steps){
         if (project_imgs_) {
@@ -187,11 +233,77 @@ void StereoFringeProcess::project_image_timer_cb()
 
     // Check if can project and n_proj_ is below projection img number
     if (static_cast<size_t>(n_proj_) < all_imgs_.size() && project_imgs_) {
-        cv::imshow(window_name_, all_imgs_[n_proj_]);
-        cv::waitKey(1);
+        // cv::imshow(window_name_, all_imgs_[n_proj_]);
+        // cv::waitKey(1);
+        // RCLCPP_INFO(this->get_logger(), "Projecting img: %d", n_proj_);
+        cv::Mat current_frame = all_imgs_[n_proj_];
+        // Default brush mix is White (1.0, 1.0, 1.0)
+        float r = 1.0f, g = 1.0f, b = 1.0f; 
+
+        // If the input image is already 1-channel, follow the param color directive
+        if (color_ == "blue")      { r = 0.0f; g = 0.0f; b = 1.0f; }
+        else if (color_ == "green") { r = 0.0f; g = 1.0f; b = 0.0f; }
+        else if (color_ == "red")   { r = 1.0f; g = 0.0f; b = 0.0f; }
+    
+        // 4. Strict Memory Alignment Mapping
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        // Protects against row-padding memory shifts inside OpenCV structures
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, current_frame.step / current_frame.elemSize());
+
+        glBindTexture(GL_TEXTURE_2D, pattern_texture_id_);
+        
+        // 5. High-Contrast Luminance Map Allocation
+        // Uploading 1-channel data maps perfectly to GL_LUMINANCE
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, 
+                        current_frame.cols, current_frame.rows, 
+                        0, GL_LUMINANCE, GL_UNSIGNED_BYTE, current_frame.data);
+
+        glEnable(GL_TEXTURE_2D);
+        
+        // =================================================================
+        // THE COLOR MULTIPLIER
+        // Maps the grayscale texture directly to your projector's target laser channel
+        // =================================================================
+        glColor3f(r, g, b);
+
+        // 6. Draw texture coordinates mapped to the full frame view
+        glBegin(GL_QUADS);
+            glTexCoord2f(0.0f, 1.0f); glVertex2f(-1.0f, -1.0f);
+            glTexCoord2f(1.0f, 1.0f); glVertex2f( 1.0f, -1.0f);
+            glTexCoord2f(1.0f, 0.0f); glVertex2f( 1.0f,  1.0f);
+            glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f,  1.0f);
+        glEnd();
+
+        glDisable(GL_TEXTURE_2D);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glfwSwapBuffers(gl_window_);
+        glfwPollEvents();
     } else { 
-        cv::imshow(window_name_, black_img_);
-        cv::waitKey(1);
+        // cv::imshow(window_name_, black_img_);
+        // cv::waitKey(1);
+        cv::Mat current_frame = black_img_;
+        glfwMakeContextCurrent(gl_window_);
+        glBindTexture(GL_TEXTURE_2D, pattern_texture_id_);
+        
+        // Ensure texture formats map accurately (Mono8 channels match GL_RED)
+        GLenum format = (current_frame.channels() == 1) ? GL_RED : GL_BGR;
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, current_frame.cols, current_frame.rows, 
+                     0, format, GL_UNSIGNED_BYTE, current_frame.data);
+
+        // 3. Render a textured quad filling the entire window context
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_TEXTURE_2D);
+        glBegin(GL_QUADS);
+            glTexCoord2f(0.0f, 1.0f); glVertex2f(-1.0f, -1.0f);
+            glTexCoord2f(1.0f, 1.0f); glVertex2f( 1.0f, -1.0f);
+            glTexCoord2f(1.0f, 0.0f); glVertex2f( 1.0f,  1.0f);
+            glTexCoord2f(0.0f, 0.0f); glVertex2f(-1.0f,  1.0f);
+        glEnd();
+
+        // 4. Swap buffers. The GPU driver will block this line, stalling your
+        // thread until the V-Blank signal indicates the image is fully projected.
+        glfwSwapBuffers(gl_window_);
+        glfwPollEvents();
     }
 
     // 2. Send trigger if processing and do not receive
