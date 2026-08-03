@@ -39,8 +39,8 @@ class TriangulationNode(Node):
 
         # Parameters
         self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_fringe_projection/params/SM4.yaml')
-        self.declare_parameter('mod_thresh', 30) #cupy 0.07. torch (0-255)
-        self.declare_parameter('rad_tresh', 0.1) #threshold for radian difference
+        self.declare_parameter('mod_thresh', 50) #cupy 0.07. torch (0-255)
+        self.declare_parameter('rad_tresh', 0.05) #threshold for radian difference
         self.declare_parameter('debug_save_points', False)
         self.declare_parameter('save_filename', 'fringe_points')
         self.declare_parameter('camera_frame_id', '/Active/left_camera_link')
@@ -65,7 +65,9 @@ class TriangulationNode(Node):
         self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
         self.phase_process = self.create_client(Trigger, 'phase_process')
 
-        self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, 10)
+        sub_profile = rclpy.qos.QoSProfile(reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=5)
+
+        self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, sub_profile)
 
         # Torch class
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
@@ -106,7 +108,7 @@ class TriangulationNode(Node):
 
         # Verifica se todas as imagens foram recebidas
         if all(image is not None for image in self.images.values()):
-            self.get_logger().info("All images received, starting processing.")
+            # self.get_logger().info("All images received, starting processing.")
             if self.process_triang:
                 self.process_images()
 
@@ -259,7 +261,12 @@ class TriangulationNode(Node):
         points_homogeneous = np.hstack((points_xyz_cam, np.ones((points_xyz_cam.shape[0], 1))))
 
         # Apply the transformation
-        tf_sm2_sm4 = self.tf_buffer.lookup_transform(sm4_frame_id, points.header.frame_id, rclpy.time.Time())
+        try:
+            tf_sm2_sm4 = self.tf_buffer.lookup_transform(sm4_frame_id, points.header.frame_id, rclpy.time.Time())
+        except Exception as e:
+            self.get_logger().warn(f"Transform from {points.header.frame_id} to {sm4_frame_id} not found: {e}")
+            return
+        
         T_sm2_sm4 = self.do_transform_matrix(tf_sm2_sm4)
         transformed_ph = (T_sm2_sm4 @ points_homogeneous.T).T
 
@@ -278,8 +285,11 @@ class TriangulationNode(Node):
         filtered_points = transformed_xyz[mask]
 
         # Obtém os limites globais dos pontos
-        self.zmin = np.min(filtered_points[:, 2])  # Consider only Z values
-        self.zmax = np.max(filtered_points[:, 2])  # Consider only Z values
+        self.zmin = np.min(filtered_points[:, 2]) - 100 # Consider only Z values
+        self.zmax = np.max(filtered_points[:, 2]) + 100# Consider only Z values
+        if abs(self.zmin) + abs(self.zmax) > 1000:
+            self.zmax = 1000 - abs(self.zmin)
+            # self.get_logger().warning(f'Z limits are too large: zmin={self.zmin}, zmax={self.zmax}. Resetting to default values.')
 
     def do_transform_matrix(self, msg):
         # Trnasforma as mensagens de PoseStamped e TransformStamped em uma matriz de transformação 4x4

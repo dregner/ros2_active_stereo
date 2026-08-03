@@ -56,7 +56,9 @@ class InverseTriangulationNode(Node):
         self.right_images = []
 
         # Initialize the subscribers
-        self.passive_pcl_sub = self.create_subscription(PointCloud2, 'disparity/pointcloud', self.z_limits_global, 10)
+        sub_profile = rclpy.qos.QoSProfile(reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=5)
+
+        self.passive_pcl_sub = self.create_subscription(PointCloud2, 'disparity/pointcloud', self.z_limits_global, sub_profile)
         self.handshake_images_sub = self.create_subscription(Int16, 'handshake_images', self.handshake_images_cb, 10)
         
         # Initialize the publisher
@@ -151,7 +153,7 @@ class InverseTriangulationNode(Node):
 
         GRID_LIMITS = {'x': (-100, 500), 'y': (-100, 400), 'z': (self.zmin, self.zmax)}
         GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 0.5, 'z': 1.0} # second steps of 3d patch
+        GRID_STEPS_2 = {'xy': 0.5, 'z': 0.5} # second steps of 3d patch
         # GRID_STEPS_3= {'xy': 1.0, 'z': 0.01} # second steps of 3d patch
 
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
@@ -256,9 +258,11 @@ class InverseTriangulationNode(Node):
         filtered_points = transformed_xyz[mask]
 
         # Obtém os limites globais dos pontos
-        self.zmin = np.min(filtered_points[:, 2]) - 10  # Consider only Z values
-        self.zmax = np.max(filtered_points[:, 2]) + 10  # Consider only Z values
-        # self.get_logger().info(f'Z range: ({self.zmin:.2f}, {self.zmax:.2f})')
+        self.zmin = np.min(filtered_points[:, 2]) - 100  # Consider only Z values
+        self.zmax = np.max(filtered_points[:, 2]) + 100  # Consider only Z values
+        if abs(self.zmin) + abs(self.zmax) > 1500:
+            self.zmax = 1500 - abs(self.zmin)
+            # self.get_logger().warning(f'Z limits are too large: zmin={self.zmin}, zmax={self.zmax}. Resetting to default values.')
 
     def do_transform_matrix(self, msg):
         # Trnasforma as mensagens de PoseStamped e TransformStamped em uma matriz de transformação 4x4

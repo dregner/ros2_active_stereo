@@ -49,6 +49,7 @@ private:
                     const std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     void construct_window();
     void project_image_timer_cb();
+    void execute_next_scan_step();
 
     std::unique_ptr<FringeProcess> fringe_process_ptr_;
 
@@ -71,6 +72,15 @@ private:
 
     std::string window_name_{"fringe"};
     std::pair<int, int> window_position_;
+
+    enum class ScanState {
+    IDLE,
+    PROJECTING_AND_SETTLING,
+    WAITING_FOR_FRAME
+    };
+
+    ScanState scan_state_{ScanState::IDLE};
+    rclcpp::Time pattern_timestamp_;
 
     std::vector<cv::Mat> all_imgs_;
     std::vector<cv::Mat> process_result_;

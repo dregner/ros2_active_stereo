@@ -16,7 +16,7 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
     this->declare_parameter("save_path", "/tmp/structured-light");
     this->declare_parameter("save_image", true);
     this->declare_parameter("debug", true);
-    this->declare_parameter("trigger_delay", 4);
+    this->declare_parameter("trigger_delay", 40);
     // Structured light params to class
     pixel_per_fringe = this->get_parameter("pixel_per_fringe").as_int();
     fringe_steps = this->get_parameter("fringe_steps").as_int();
@@ -94,6 +94,7 @@ void StereoFringeProcess::process_srv_cb(const std::shared_ptr<std_srvs::srv::Tr
     n_proj_ = 0; // Garante que a projeção comece do início
     project_imgs_ = true; // Ativa a projeção
     process_ = true;
+    RCLCPP_INFO(this->get_logger(), "Project total %d images", all_imgs_.size());
     // Depois de processar, você pode publicar os resultados ou fazer o que for necessário
     response->message = "Initated process";
     response->success = true;
@@ -142,7 +143,7 @@ void StereoFringeProcess::construct_window()
     cv::setWindowProperty(window_name_, cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);  
 }
 
-/* Timer callback for projecting images */
+// Timer callback for projecting images
 void StereoFringeProcess::project_image_timer_cb()
 {
     int px_f = this->get_parameter("pixel_per_fringe").as_int();
@@ -189,7 +190,7 @@ void StereoFringeProcess::project_image_timer_cb()
     if (static_cast<size_t>(n_proj_) < all_imgs_.size() && project_imgs_) {
         cv::imshow(window_name_, all_imgs_[n_proj_]);
         cv::waitKey(1);
-    } else { 
+    } else  { 
         cv::imshow(window_name_, black_img_);
         cv::waitKey(1);
     }
@@ -198,7 +199,8 @@ void StereoFringeProcess::project_image_timer_cb()
     if (process_){
         if(!receive_imgs_){ 
             std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-            send_trigger();} 
+            send_trigger();
+        } 
         else{ 
             receive_imgs_ = false; 
             skip_frames_ = this->get_parameter("skip_trigger").as_int(); 
@@ -267,7 +269,7 @@ void StereoFringeProcess::stereo_callback(const sensor_msgs::msg::Image::ConstSh
 
 
     // 2. Fluxo de Captura de Padrões
-    if (process_ && !receive_imgs_) {
+    if (process_) {
         if (skip_frames_ > 0) {
             skip_frames_--;
             return;
@@ -276,15 +278,14 @@ void StereoFringeProcess::stereo_callback(const sensor_msgs::msg::Image::ConstSh
             // Converte imagens usando toCvShare (mais eficiente, sem cópia)
             cv::Mat left = cv_bridge::toCvShare(left_msg, "mono8")->image;
             cv::Mat right = cv_bridge::toCvShare(right_msg, "mono8")->image;
-
-            // RCLCPP_INFO(this->get_logger(), "Processing pattern %d / %zu", 
-            //             n_proj_, all_imgs_.size());
-
+            
             // Armazena no buffer do fringe_process
             if (n_proj_ != 0){
+                // RCLCPP_INFO(this->get_logger(), "Processing pattern %d / %zu", n_proj_, all_imgs_.size());
                 fringe_process_ptr_->set_images(left, right, (n_proj_-1));
             }
-            receive_imgs_ = true;
+            
+
             
             if (static_cast<size_t>(n_proj_) >= all_imgs_.size()) {
                 process_ = false;
@@ -296,14 +297,16 @@ void StereoFringeProcess::stereo_callback(const sensor_msgs::msg::Image::ConstSh
                 process_result = fringe_process_ptr_->calculate_abs_phi_images(debug);
                 RCLCPP_INFO(this->get_logger(), "Publishing processed images");
                 publish_processed_images(process_result);
-            } 
-
+            } else{
+            // n_proj_++;
+            receive_imgs_ = true;
+            }
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
         }
     } 
     else {
-        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Idle: Waiting for project_imgs_ flag.");
+        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Idle: Waiting for process_ flag.");
     }
 }
 
@@ -354,7 +357,7 @@ void StereoFringeProcess::publish_processed_images(std::vector<cv::Mat> images)
             publish_normalized(pub_abs_right_debug_, images[1], header_right); // Fase Dir
         }
 
-        RCLCPP_INFO(this->get_logger(), ">>> Mapas 64FC1 publicados com sucesso no ROS 2.");
+        // RCLCPP_INFO(this->get_logger(), ">>> Mapas 64FC1 publicados com sucesso no ROS 2.");
 
     } catch (cv_bridge::Exception& e) {
         RCLCPP_ERROR(this->get_logger(), "Erro fatal no cv_bridge: %s", e.what());
@@ -365,7 +368,7 @@ void StereoFringeProcess::publish_processed_images(std::vector<cv::Mat> images)
 // Auxiliar function for trigger
 void StereoFringeProcess::send_trigger()
 {
-// Check if client is ready to avoid crashing
+    // Check if client is ready to avoid crashing
     if (!trigger_client_->service_is_ready()) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Trigger service not ready!");
         return;
@@ -383,26 +386,6 @@ void StereoFringeProcess::send_trigger()
         });
 }
 
-// Trigger callback
-void StereoFringeProcess::trigger_callback(rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future)
-{
-    try {
-        // 1. Tenta obter o resultado do "future"
-        auto response = future.get();
-
-        if (response->success) {
-            // Opcional: Log de sucesso (use DEBUG para não poluir o terminal)
-            RCLCPP_DEBUG(this->get_logger(), "Trigger enviado com sucesso: %s", response->message.c_str());
-        } else {
-            RCLCPP_ERROR(this->get_logger(), "O serviço de Trigger falhou: %s", response->message.c_str());
-            
-            // Estratégia de erro: se falhar, talvez você queira resetar o n_proj_
-            // ou tentar enviar o trigger novamente.
-        }
-    } catch (const std::exception &e) {
-        RCLCPP_ERROR(this->get_logger(), "Exceção ao receber resposta do serviço: %s", e.what());
-    }
-}
 }
 
 RCLCPP_COMPONENTS_REGISTER_NODE(ros2_active_stereo::StereoFringeProcess)
