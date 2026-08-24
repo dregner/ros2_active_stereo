@@ -148,7 +148,7 @@ class TriangulationNode(Node):
 
         GRID_LIMITS = {'x': (-200, 600), 'y': (-200, 600), 'z': (self.zmin, self.zmax)}
         GRID_STEPS_1 = {'xy': 2.0, 'z': 1.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 0.75, 'z': 0.1} # second steps of 3d patch
+        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.1} # second steps of 3d patch
         
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
 
@@ -166,6 +166,8 @@ class TriangulationNode(Node):
         if xyz_filtered_gpu.numel() == 0:
             self.get_logger().warning("No points found")
             return
+        
+        self.publish_pointcloud(xyz_filtered_gpu.cpu().numpy())
         
         self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_filtered_gpu.shape[0]}')
         t0 = time.time()

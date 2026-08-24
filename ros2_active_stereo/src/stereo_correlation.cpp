@@ -36,7 +36,7 @@ public:
         // parametros
         this->declare_parameter<int>("num_images",10);
         this->declare_parameter<int>("steps", 20);
-        num_images_ = this->get_parameter("num_images").as_int() +3; // +2 porque a(s) primeira(s) imagem sempre e'/sao perdida(s)
+        num_images_ = this->get_parameter("num_images").as_int() +10; // +2 porque a(s) primeira(s) imagem sempre e'/sao perdida(s)
         steps_ = this->get_parameter("steps").as_int();
 
         //publisher
@@ -175,7 +175,7 @@ private:
             count_++;
             //RCLCPP_INFO(this->get_logger(), "[C++] Par %d recebido pelo nó. L_Stamp: %d.%d", count_, left_msg->header.stamp.sec, left_msg->header.stamp.nanosec);
 
-            if (count_ == num_images_-3) {
+            if (count_ == this->get_parameter("num_images").as_int()) {
                 RCLCPP_WARN(this->get_logger(), "Sucesso, todas as %d imagens chegaram e foram salvas.", count_);
                 send_handshake(count_);
             }
@@ -295,6 +295,7 @@ private:
            if (result_laser->success){
                 auto move_motor_return_request = std::make_shared<ros2_active_stereo_msgs::srv::MoveMotor::Request>();
                 move_motor_return_request->angle = -(steps_*(num_images_)/2048.0f)*360.0f;
+                RCLCPP_INFO(this->get_logger(), "Return motor %f", -(steps_*(num_images_)/2048.0f)*360.0f);
                 auto future_move_motor_return = motor_client_->async_send_request(move_motor_return_request);
                 if (future_move_motor_return.wait_for(std::chrono::seconds(5)) == std::future_status::ready){ 
                      auto result_move_motor_return = future_move_motor_return.get();

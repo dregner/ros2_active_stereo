@@ -36,7 +36,7 @@ class InverseTriangulationNode(Node):
         self.declare_parameter('threshold', 0.7)
         self.declare_parameter('std_thresh', 20)
         self.declare_parameter('radius', 10)
-        self.declare_parameter('neighbours', 5)
+        self.declare_parameter('neighbours', 10)
         self.declare_parameter('crop_image_factor', 0.9)
         self.declare_parameter('save_filename', "correlation_points")
         self.declare_parameter('debug_save_points', False)
@@ -151,9 +151,11 @@ class InverseTriangulationNode(Node):
         filename = self.get_parameter('save_filename').get_parameter_value().string_value
         crop_factor = self.get_parameter('crop_image_factor').get_parameter_value().double_value
 
-        GRID_LIMITS = {'x': (-100, 500), 'y': (-100, 400), 'z': (self.zmin, self.zmax)}
+        self.get_logger().info(f'Threshold: {correl_thresh*100} %, Win: {win_size}x{win_size}x{self.num_images}')
+
+        GRID_LIMITS = {'x': (-100, 600), 'y': (-100, 600), 'z': (self.zmin, self.zmax)}
         GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 0.5, 'z': 0.5} # second steps of 3d patch
+        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.1} # second steps of 3d patch
         # GRID_STEPS_3= {'xy': 1.0, 'z': 0.01} # second steps of 3d patch
 
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')

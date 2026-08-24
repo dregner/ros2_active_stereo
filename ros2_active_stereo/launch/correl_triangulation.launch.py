@@ -23,6 +23,16 @@ def generate_launch_description():
                 description='Disparity point cloud topic'
             ),
             DeclareLaunchArgument(
+                'neighbours',
+                default_value='15',
+                description='num_splits'
+            ),
+            DeclareLaunchArgument(
+                'radius',
+                default_value='5',
+                description='num_splits'
+            ),
+            DeclareLaunchArgument(
                 'n_images',
                 default_value='20',
                 description='Number of images to acquire'
@@ -70,6 +80,8 @@ def generate_launch_description():
                      'camera_frame_id': LaunchConfiguration('camera_frame_id'),
                      'threshold': LaunchConfiguration('correl_thresh'),
                      'std_thresh': LaunchConfiguration('std_thresh'),
+                     'neightbours': LaunchConfiguration('neighbours'),
+                     'radius': LaunchConfiguration('radius'),
                      'zval': LaunchConfiguration('zval')}
                 ],
                 remappings=[
