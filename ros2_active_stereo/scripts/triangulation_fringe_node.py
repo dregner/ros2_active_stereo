@@ -11,7 +11,7 @@ import time
 import tf2_ros
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs_py.point_cloud2 as pc2
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, PoseStamped, PoseWithCovarianceStamped
 from std_msgs.msg import Header
 import tf_transformations
 
@@ -47,6 +47,7 @@ class TriangulationNode(Node):
         self.declare_parameter('zval', 400)
         self.declare_parameter('neighbours', 5)
         self.declare_parameter('radius', 10)
+        self.declare_parameter('ekf', False)
 
         self.zmin = -self.get_parameter('zval').get_parameter_value().integer_value
         self.zmax = self.get_parameter('zval').get_parameter_value().integer_value
@@ -68,12 +69,21 @@ class TriangulationNode(Node):
         sub_profile = rclpy.qos.QoSProfile(reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=5)
 
         self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, sub_profile)
+        if(self.get_parameter('ekf').get_parameter_value().bool_value):
+            self.pose_sub = self.create_subscription(PoseStamped, '/mavros/local_position/pose', self.pose_cb, sub_profile)
+        else:
+            self.pose_sub = self.create_subscription(PoseWithCovarianceStamped, '/mavros/vision_pose/pose', self.pose_cb, sub_profile)
+            
+        self.pose_msg = None
 
         # Torch class
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         self.zscan = PyTorchStereoCorrel(yaml_file=self.yaml_file)
         self.get_logger().info("Node 'triangulation_node' criado")
 
+    def pose_cb(self, msg):
+        if not self.process_triang:
+            self.pose_msg = msg
 
     def _phase_process(self):
         request = Trigger.Request()
@@ -136,16 +146,16 @@ class TriangulationNode(Node):
         filename = self.get_parameter('save_filename').get_parameter_value().string_value
 
 
-        GRID_LIMITS = {'x': (-100, 500), 'y': (-100, 400), 'z': (self.zmin, self.zmax)}
-        GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 1.0, 'z': 1.0} # second steps of 3d patch
+        GRID_LIMITS = {'x': (-200, 600), 'y': (-200, 600), 'z': (self.zmin, self.zmax)}
+        GRID_STEPS_1 = {'xy': 2.0, 'z': 1.0} # first steps of 3d patch
+        GRID_STEPS_2 = {'xy': 0.75, 'z': 0.1} # second steps of 3d patch
         
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
 
         self.zscan.points3d(x_lim=GRID_LIMITS['x'], y_lim   =GRID_LIMITS['y'], z_lim=GRID_LIMITS['z'],
                             xy_step=GRID_STEPS_1['xy'], z_step=GRID_STEPS_1['z'])
                         
-        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=20, method='fringe')
+        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=10, method='fringe')
         # filter points based on difference value in radians
         filter_mask = corr_gpu < rad_tresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
@@ -176,7 +186,7 @@ class TriangulationNode(Node):
         self.zscan.points3d(x_lim=xlim, y_lim=ylim, z_lim=zlim, 
                             xy_step=GRID_STEPS_2['xy'], z_step=GRID_STEPS_2['z'])
                         
-        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=5, method='fringe')
+        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=60, method='fringe')
 
         
         filter_mask = corr_gpu < rad_tresh

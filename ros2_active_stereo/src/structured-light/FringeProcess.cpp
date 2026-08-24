@@ -11,13 +11,16 @@ FringeProcess::FringeProcess(cv::Size img_res, cv::Size cam_res, int px_f, int s
 
     images_left.resize(total_images);
     images_right.resize(total_images);
+    clear_images();
+    
+}
 
+void FringeProcess::clear_images(){
     for (int i = 0; i < total_images; ++i) {
         images_left[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
         images_right[i] = cv::Mat::zeros(cam_height, cam_width, CV_8UC1);
     }
 }
-
 bool FringeProcess::save_images(std::string path){
     try {
         // Cria os diretórios recursivamente como um mkdir -p
@@ -199,4 +202,47 @@ std::vector<cv::Mat> FringeProcess::calculate_abs_phi_images(bool save_debug) {
     std::cout << "Process abs phase: " << std::chrono::duration<double>(end - start).count() << "s" << std::endl;
 
     return {abs_l, abs_r, mod_l, mod_r};
+}
+
+bool FringeProcess::save_abs_phi_txt(const cv::Mat& mat, const std::string& filename) {
+    // 1. Verify the matrix is not empty
+    if (mat.empty()) {
+        std::cerr << "Error: Matrix is empty. Cannot save to " << filename << std::endl;
+        return false;
+    }
+
+    // 2. Enforce the 64FC1 type check (64-bit float, 1 channel)
+    if (mat.type() != CV_64FC1) {
+        std::cerr << "Error: Matrix is not of type CV_64FC1." << std::endl;
+        return false;
+    }
+
+    // 3. Open the output file
+    std::ofstream outFile(filename);
+    if (!outFile.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << " for writing." << std::endl;
+        return false;
+    }
+
+    // 4. Set precision for 64-bit floats (doubles)
+    outFile << std::fixed << std::setprecision(6);
+
+    // 5. Iterate through rows and columns efficiently
+    for (int r = 0; r < mat.rows; ++r) {
+        // Get a pointer to the beginning of the current row
+        const double* rowPtr = mat.ptr<double>(r);
+        
+        for (int c = 0; c < mat.cols; ++c) {
+            outFile << rowPtr[c];
+            
+            // Add a space delimiter between columns, but not after the last column
+            if (c < mat.cols - 1) {
+                outFile << " "; 
+            }
+        }
+        outFile << "\n"; // Newline at the end of each row
+    }
+
+    outFile.close();
+    return true;
 }

@@ -53,7 +53,7 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
     auto qos = rclcpp::SensorDataQoS();
     qos.keep_last(2);
     rclcpp::SubscriptionOptions sub_options;    
-
+    // sub_options.callback_group = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     // Subscribers
     sub_left_.subscribe(this, "left/image_raw", qos.get_rmw_qos_profile(), sub_options);
     sub_right_.subscribe(this, "right/image_raw", qos.get_rmw_qos_profile(), sub_options);
@@ -294,7 +294,8 @@ void StereoFringeProcess::stereo_callback(const sensor_msgs::msg::Image::ConstSh
                 // RCLCPP_INFO(this->get_logger(), "Sequência completa! Iniciando salvamento...");
                 std::vector<cv::Mat> process_result;
                 bool debug = this->get_parameter("debug").as_bool();
-                process_result = fringe_process_ptr_->calculate_abs_phi_images(debug);
+                process_result = fringe_process_ptr_->calculate_abs_phi_images(false);
+                // fringe_process_ptr_->clear_images();
                 RCLCPP_INFO(this->get_logger(), "Publishing processed images");
                 publish_processed_images(process_result);
             } else{
@@ -316,6 +317,16 @@ void StereoFringeProcess::publish_processed_images(std::vector<cv::Mat> images)
     if (images.size() < 4) {
         RCLCPP_WARN(this->get_logger(), "Falha ao publicar: Vetor de imagens incompleto!");
         return;
+    }
+
+    if(this->get_parameter("debug").as_bool()){
+        RCLCPP_INFO(this->get_logger(), "saving phi images");
+        bool save_1, save_2;
+        save_1 = fringe_process_ptr_->save_abs_phi_txt(images[0], "left_abs_phi.txt");
+        save_2 = fringe_process_ptr_->save_abs_phi_txt(images[1], "right_abs_phi.txt");
+        if(save_1 && save_2){
+            RCLCPP_INFO(this->get_logger(), "Absolute phi image saved");
+        }
     }
 
     // Cria um header sincronizado para o par estéreo

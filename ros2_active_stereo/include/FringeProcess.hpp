@@ -10,6 +10,8 @@
 #include <vector>
 #include <math.h>
 #include <set>
+#include <fstream>
+#include <string>
 
 class FringeProcess : public FringePattern, public GrayCode {
 public:
@@ -28,8 +30,9 @@ public:
 
     void set_camera_resolution(cv::Size cam_resolution);
     int get_total_images();
-
+    void clear_images();
     bool save_images(std::string path);
+    bool save_abs_phi_txt(const cv::Mat& mat, const std::string& filename);
     // Retorna {abs_phi_l, abs_phi_r, mod_l, mod_r}
     std::vector<cv::Mat> calculate_abs_phi_images(bool save_debug);
 
