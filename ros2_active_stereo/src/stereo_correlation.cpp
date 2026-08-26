@@ -79,26 +79,25 @@ public:
         cb_group_srv_    = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         cb_group_client_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
-        auto srv_qos = rclcpp::ServicesQoS();
+        // auto srv_qos = rclcpp::ServicesQoS();
         srv_ = this->create_service<std_srvs::srv::SetBool>(
             "correlation_process",
             std::bind(&StereoCorrelProcess::get_images_srv, this,
-                      std::placeholders::_1, std::placeholders::_2),
-            srv_qos, cb_group_srv_);
+                      std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
 
         save_im_srv_ = this->create_service<std_srvs::srv::Trigger>(
             "save_images_ssd",
             std::bind(&StereoCorrelProcess::save_images_ssd_srv, this,
-                      std::placeholders::_1, std::placeholders::_2));
+                      std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
 
         gpio_client_ = this->create_client<std_srvs::srv::Trigger>(
-            "trigger", srv_qos, cb_group_client_);
+            "trigger", rmw_qos_profile_default, cb_group_client_);
 
         laser_client_ = this->create_client<std_srvs::srv::SetBool>(
-            "laser", srv_qos, cb_group_client_);
+            "laser", rmw_qos_profile_default, cb_group_client_);
 
         motor_client_ = this->create_client<ros2_active_stereo_msgs::srv::MoveMotor>(
-            "move_motor", srv_qos, cb_group_client_);
+            "move_motor", rmw_qos_profile_default, cb_group_client_);
     }
 
 private:

@@ -97,27 +97,24 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
     scan_done_pub_ = this->create_publisher<std_msgs::msg::String>("fringe_status", 10);
 
     // ── Services / clients ────────────────────────────────────────────────
-    auto srv_qos = rclcpp::ServicesQoS();
+    // auto srv_qos = rclcpp::ServicesQoS();
     change_image_service_ = this->create_service<std_srvs::srv::SetBool>(
         "image_project",
         std::bind(&StereoFringeProcess::project_cb, this,
-                  std::placeholders::_1, std::placeholders::_2),
-        srv_qos, srv_cb_group_);
+                  std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
 
     process_service_ = this->create_service<std_srvs::srv::Trigger>(
         "phase_process",
         std::bind(&StereoFringeProcess::process_srv_cb, this,
-                  std::placeholders::_1, std::placeholders::_2),
-        srv_qos, srv_cb_group_);
+                  std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
 
     save_imgs_service_ = this->create_service<std_srvs::srv::Trigger>(
         "save_image",
         std::bind(&StereoFringeProcess::save_img_srv_cb, this,
-                  std::placeholders::_1, std::placeholders::_2),
-        srv_qos, srv_cb_group_);
+                  std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
 
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>(
-        "trigger", srv_qos, srv_cb_group_);
+        "trigger", rmw_qos_profile_default, srv_cb_group_);
 
     // ── Display timer (keeps OpenCV window alive; does NOT drive acquisition)
     display_timer_ = this->create_wall_timer(

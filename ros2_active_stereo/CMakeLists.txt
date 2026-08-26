@@ -105,7 +105,8 @@ install(TARGETS
     )
 
 install(DIRECTORY include/
-  DESTINATION include
+      DESTINATION lib/${PROJECT_NAME}
+
 )
 
 install(
@@ -113,6 +114,7 @@ install(
     scripts/triangulation_fringe_node.py
     scripts/triangulation_correl_node.py
     scripts/SpatialCorrelation_pytorch.py
+    scripts/phase_processing_node.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
