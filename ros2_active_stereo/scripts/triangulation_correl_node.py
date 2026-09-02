@@ -154,7 +154,7 @@ class InverseTriangulationNode(Node):
         self.get_logger().info(f'Threshold: {correl_thresh*100} %, Win: {win_size}x{win_size}x{self.num_images}')
 
         GRID_LIMITS = {'x': (-100, 600), 'y': (-100, 600), 'z': (self.zmin, self.zmax)}
-        GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
+        GRID_STEPS_1 = {'xy': 1.0, 'z': 2.0} # first steps of 3d patch
         GRID_STEPS_2 = {'xy': 1.0, 'z': 0.1} # second steps of 3d patch
         # GRID_STEPS_3= {'xy': 1.0, 'z': 0.01} # second steps of 3d patch
 
@@ -166,7 +166,7 @@ class InverseTriangulationNode(Node):
         xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=win_size, Ky=win_size, stride=stride, Nz_block_voxels=10, method='correl')
 
         # filter points based on difference value in radians
-        filter_mask = corr_gpu > 0.6
+        filter_mask = corr_gpu > correl_thresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.mask_uv_points(xyz_filtered_gpu, corr_filtered_gpu, crop_factor=crop_factor)
@@ -174,8 +174,8 @@ class InverseTriangulationNode(Node):
         # clean points based on neighbours
         final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
         
-        if final_xyz_gpu.numel() == 0:
-            self.get_logger().warning("No points found")
+        if final_xyz_gpu.numel() < 100:
+            self.get_logger().warning("No sufficient points found")
             return
 
         self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
@@ -229,8 +229,8 @@ class InverseTriangulationNode(Node):
         points_xyz_cam = np.array(points_list, dtype=np.float32)
 
         # self.get_logger().info(f'Points XYZ shape: {points_xyz.shape}, dtype: {points_xyz.dtype}')
-        if points_xyz_cam.shape[0] == 0:
-            self.get_logger().warn('No valid points found in the point cloud after skipping NaNs.')
+        if points_xyz_cam.shape[0] < 100:
+            self.get_logger().warn('No sufficient points found in the point cloud after skipping NaNs.')
             return
             
         # Add a fourth dimension (1) for homogeneous coordinates

@@ -36,7 +36,7 @@ public:
         // parametros
         this->declare_parameter<int>("num_images",10);
         this->declare_parameter<int>("steps", 20);
-        num_images_ = this->get_parameter("num_images").as_int() +10; // +2 porque a(s) primeira(s) imagem sempre e'/sao perdida(s)
+        num_images_ = this->get_parameter("num_images").as_int() +4; // +2 porque a(s) primeira(s) imagem sempre e'/sao perdida(s)
         steps_ = this->get_parameter("steps").as_int();
 
         //publisher
@@ -105,6 +105,8 @@ private:
     int num_images_;
     int steps_;
     
+    std::vector<cv::Mat> left_imgs;
+    std::vector<cv::Mat> right_imgs;
     // services
     rclcpp::CallbackGroup::SharedPtr cb_group_srv_;
     rclcpp::CallbackGroup::SharedPtr cb_group_client_;
@@ -157,26 +159,19 @@ private:
             cv::Mat left_mat = cv_bridge::toCvShare(left_msg, "mono8")->image;
             cv::Mat right_mat = cv_bridge::toCvShare(right_msg, "mono8")->image;
 
+            left_imgs.push_back(left_mat);
+            right_imgs.push_back(right_mat);
+
+            count_++;
+            //RCLCPP_INFO(this->get_logger(), "[C++] Par %d recebido pelo nó. L_Stamp: %d.%d", count_, left_msg->header.stamp.sec, left_msg->header.stamp.nanosec);
             if (left_mat.empty() || right_mat.empty()) {
                 RCLCPP_WARN(this->get_logger(), "frame vazio recebido");
                 return;
             }
 
-            std::string base_path = "/tmp/rrp_stereo/";
-            char left_filename[256], right_filename[256];
-            
-            
-            snprintf(left_filename, sizeof(left_filename), "%sleft/L%02d.png", base_path.c_str(), count_+1);
-            snprintf(right_filename, sizeof(right_filename), "%sright/R%02d.png", base_path.c_str(), count_+1);
-
-            cv::imwrite(left_filename, left_mat);
-            cv::imwrite(right_filename, right_mat);
-
-            count_++;
-            //RCLCPP_INFO(this->get_logger(), "[C++] Par %d recebido pelo nó. L_Stamp: %d.%d", count_, left_msg->header.stamp.sec, left_msg->header.stamp.nanosec);
-
             if (count_ == this->get_parameter("num_images").as_int()) {
                 RCLCPP_WARN(this->get_logger(), "Sucesso, todas as %d imagens chegaram e foram salvas.", count_);
+                save_images();
                 send_handshake(count_);
             }
 
@@ -185,6 +180,23 @@ private:
             return;
         }
 
+    }
+
+    void save_images(){
+
+         
+            for (int i=0; i < count_; i++){
+                
+                std::string base_path = "/tmp/rrp_stereo/";
+                char left_filename[256], right_filename[256];
+                
+            
+                snprintf(left_filename, sizeof(left_filename), "%sleft/L%02d.png", base_path.c_str(), i+1);
+                snprintf(right_filename, sizeof(right_filename), "%sright/R%02d.png", base_path.c_str(), i+1);
+                
+                cv::imwrite(left_filename, left_imgs[i]);
+                cv::imwrite(right_filename, right_imgs[i]);
+            }
     }
 
     void save_images_ssd_srv(const std::shared_ptr<std_srvs::srv::Trigger::Request> request, std::shared_ptr<std_srvs::srv::Trigger::Response> response){

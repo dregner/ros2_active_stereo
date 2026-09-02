@@ -220,7 +220,7 @@ private:
                 }
                 std::this_thread::sleep_for(std::chrono::microseconds(delay_));
             }
-            RCLCPP_INFO(this->get_logger(), "Motor movement complete.");
+            // RCLCPP_INFO(this->get_logger(), "Motor movement complete.");
         }
         
         response->success = true;
