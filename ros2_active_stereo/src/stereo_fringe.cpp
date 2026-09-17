@@ -1,13 +1,13 @@
 #include <stereo_fringe.hpp>
 #include <chrono>
 #include <mutex>
+#include <algorithm>
 
 namespace ros2_active_stereo
 {
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constructor
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Constructor ───────────────────────────────────────────────────────────────
+
 StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
 : Node("image_project_node", options)
 {
@@ -16,69 +16,67 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
     this->declare_parameter("pixel_per_fringe",  128);
     this->declare_parameter("fringe_steps",      4);
     this->declare_parameter("image_color",       "blue");
-    this->declare_parameter("camera_hz",         20);
+    this->declare_parameter("camera_hz",         30);
     this->declare_parameter("save_path",         "/tmp/structured-light");
-    this->declare_parameter("save_image",        true);
-    this->declare_parameter("debug",             true);
-    // Settling delay in ms: time between imshow() and sending the camera trigger.
-    // At 60 Hz the projector refreshes every ~16.7 ms; add a small margin.
-    // Default 22 ms is safe for most configurations — tune down if needed.
+    this->declare_parameter("save_image",        false);
+    this->declare_parameter("debug",             false);
     this->declare_parameter("settle_ms",         22);
 
-    pixel_per_fringe = this->get_parameter("pixel_per_fringe").as_int();
-    fringe_steps     = this->get_parameter("fringe_steps").as_int();
-    color_           = this->get_parameter("image_color").as_string();
-    // Display timer runs at ≤ projector frame rate (keep OpenCV window alive)
-    // as_int() returns int64_t; cast to int before arithmetic to avoid type mismatch.
-    int camera_hz = static_cast<int>(this->get_parameter("camera_hz").as_int());
-    timer_hz_ = 1000.0 / std::max(camera_hz, 1);
+    pixel_per_fringe_ = this->get_parameter("pixel_per_fringe").as_int();
+    fringe_steps_     = this->get_parameter("fringe_steps").as_int();
+    color_            = this->get_parameter("image_color").as_string();
+    settle_ms_        = this->get_parameter("settle_ms").as_int();
 
-    // ── Screen & window ───────────────────────────────────────────────────
+    // ── Screen & Window Setup ─────────────────────────────────────────────
     if (!get_screen_resolution(this->get_parameter("monitor_name").as_string())) {
         RCLCPP_ERROR(this->get_logger(), "Failed to get screen resolution");
         return;
     }
     construct_window();
 
-    // ── Pattern generation ────────────────────────────────────────────────
+    // ── Pattern Generation ────────────────────────────────────────────────
     fringe_process_ptr_ = std::make_unique<FringeProcess>(
         project_resolution_,
         cv::Size(2448, 2048),
-        pixel_per_fringe,
-        fringe_steps);
+        pixel_per_fringe_,
+        fringe_steps_);
 
-    fringe_process_ptr_->create_fringe_image();
-    fringe_process_ptr_->create_graycode_image();
+    rebuild_patterns();
 
-    all_imgs_.clear();
-    all_imgs_.push_back(black_img_);   // index 0: black warm-up frame (never stored)
-    auto gc_imgs = fringe_process_ptr_->get_gc_images(color_);
-    auto fr_imgs = fringe_process_ptr_->get_fr_images(color_);
-    all_imgs_.insert(all_imgs_.end(), gc_imgs.begin(), gc_imgs.end());
-    all_imgs_.insert(all_imgs_.end(), fr_imgs.begin(), fr_imgs.end());
-
-    RCLCPP_INFO(this->get_logger(), "Total patterns (incl. black): %zu", all_imgs_.size());
-
-    // ── Callback groups ───────────────────────────────────────────────────
-    // Mutually-exclusive groups ensure thread safety without manual locks
-    // for calls within the same group.
-    display_cb_group_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    srv_cb_group_     = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    stereo_cb_group_  = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    // ── Callback Groups ───────────────────────────────────────────────────
+    // display_cb_group_: pumps OpenCV event loop (wall timer)
+    // srv_cb_group_    : services + trigger client (MutuallyExclusive so service
+    //                    callbacks never run concurrently with each other)
+    // cam_cb_group_    : camera image subscribers (Reentrant so left & right can
+    //                    arrive and be pushed to their queues simultaneously)
+    display_cb_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    srv_cb_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+    cam_cb_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant);
 
     // ── Subscribers ───────────────────────────────────────────────────────
+    // Independent left/right subscriptions – no synchronizer needed.
+    // Each callback just pushes the decoded cv::Mat into its queue.
+    // run_acquisition() pops one frame per camera per pattern step.
     auto qos = rclcpp::SensorDataQoS();
-    qos.keep_last(2);
-    rclcpp::SubscriptionOptions sub_options;
-    sub_options.callback_group = stereo_cb_group_;
+    qos.keep_last(4);   // small buffer; we consume frames as fast as they arrive
 
-    sub_left_.subscribe(this, "left/image_raw",  qos.get_rmw_qos_profile(), sub_options);
-    sub_right_.subscribe(this, "right/image_raw", qos.get_rmw_qos_profile(), sub_options);
-    sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(
-                SyncPolicy(15), sub_left_, sub_right_);
-    sync_->registerCallback(
-        std::bind(&StereoFringeProcess::stereo_callback, this,
-                  std::placeholders::_1, std::placeholders::_2));
+    rclcpp::SubscriptionOptions cam_opts;
+    cam_opts.callback_group = cam_cb_group_;
+
+    sub_left_  = this->create_subscription<sensor_msgs::msg::Image>(
+        "left/image_raw", qos,
+        [this](const sensor_msgs::msg::Image::ConstSharedPtr& msg) {
+            left_image_cb(msg);
+        }, cam_opts);
+
+    sub_right_ = this->create_subscription<sensor_msgs::msg::Image>(
+        "right/image_raw", qos,
+        [this](const sensor_msgs::msg::Image::ConstSharedPtr& msg) {
+            right_image_cb(msg);
+        }, cam_opts);
 
     camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
         "camera_info", 10,
@@ -93,44 +91,52 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
     pub_abs_left_debug_  = this->create_publisher<sensor_msgs::msg::Image>("sync/left/debug/phase_map",  2);
     pub_abs_right_debug_ = this->create_publisher<sensor_msgs::msg::Image>("sync/right/debug/phase_map", 2);
 
-    // Status topic: subscribers can listen for "scan_started" / "scan_complete" / "scan_error"
     scan_done_pub_ = this->create_publisher<std_msgs::msg::String>("fringe_status", 10);
 
-    // ── Services / clients ────────────────────────────────────────────────
-    // auto srv_qos = rclcpp::ServicesQoS();
+    // ── Services / Clients ────────────────────────────────────────────────
     change_image_service_ = this->create_service<std_srvs::srv::SetBool>(
         "image_project",
         std::bind(&StereoFringeProcess::project_cb, this,
-                  std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
+                  std::placeholders::_1, std::placeholders::_2),
+        rclcpp::ServicesQoS(), srv_cb_group_);
 
     process_service_ = this->create_service<std_srvs::srv::Trigger>(
         "phase_process",
         std::bind(&StereoFringeProcess::process_srv_cb, this,
-                  std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
+                  std::placeholders::_1, std::placeholders::_2),
+        rclcpp::ServicesQoS(), srv_cb_group_);
 
     save_imgs_service_ = this->create_service<std_srvs::srv::Trigger>(
         "save_image",
         std::bind(&StereoFringeProcess::save_img_srv_cb, this,
-                  std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
+                  std::placeholders::_1, std::placeholders::_2),
+        rclcpp::ServicesQoS(), srv_cb_group_);
 
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>(
-        "trigger", rmw_qos_profile_default, srv_cb_group_);
+        "trigger", rclcpp::ServicesQoS(), srv_cb_group_);
 
-    // ── Display timer (keeps OpenCV window alive; does NOT drive acquisition)
+    // ── Display Timer ─────────────────────────────────────────────────────
     display_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(static_cast<long>(timer_hz_)),
+        std::chrono::milliseconds(33),
         std::bind(&StereoFringeProcess::display_timer_cb, this),
         display_cb_group_);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Destructor ────────────────────────────────────────────────────────────────
+
 StereoFringeProcess::~StereoFringeProcess() {
+    acquiring_ = false;
+    // Wake any thread blocked in pop_left / pop_right so it can exit cleanly
+    left_cv_.notify_all();
+    right_cv_.notify_all();
+    if (acquisition_thread_.joinable()) {
+        acquisition_thread_.join();
+    }
     cv::destroyWindow(window_name_);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Screen / window helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Screen / window ───────────────────────────────────────────────────────────
+
 bool StereoFringeProcess::get_screen_resolution(const std::string& monitor_name)
 {
     auto monitors = get_monitors();
@@ -144,7 +150,7 @@ bool StereoFringeProcess::get_screen_resolution(const std::string& monitor_name)
             project_resolution_ = {m.width, m.height};
             window_position_    = {m.x, m.y};
             black_img_ = cv::Mat::zeros(m.height, m.width, CV_8UC1);
-            RCLCPP_INFO(this->get_logger(), "Selected monitor '%s'", monitor_name.c_str());
+            RCLCPP_INFO(this->get_logger(), "Selected projector monitor '%s'", monitor_name.c_str());
             return true;
         }
     }
@@ -157,253 +163,242 @@ void StereoFringeProcess::construct_window()
     cv::namedWindow(window_name_, cv::WINDOW_NORMAL);
     cv::moveWindow(window_name_, window_position_.first, window_position_.second);
     cv::setWindowProperty(window_name_, cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
-    // Show black at startup so the projector is dark until a scan begins
     cv::imshow(window_name_, black_img_);
     cv::waitKey(1);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Display timer — keeps the window responsive; no acquisition logic here
-// ─────────────────────────────────────────────────────────────────────────────
-void StereoFringeProcess::display_timer_cb()
+void StereoFringeProcess::rebuild_patterns()
 {
-    if (!receive_camera_info_) {
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                             "Waiting for camera_info…");
-    }
-    // Pump the OpenCV event loop so the window stays alive and the OS
-    // compositor receives the latest imshow() framebuffer.
-    cv::waitKey(1);
+    fringe_process_ptr_->FringePattern::set_px_f(pixel_per_fringe_);
+    fringe_process_ptr_->FringePattern::set_steps(fringe_steps_);
+    fringe_process_ptr_->GrayCode::set_px_f(pixel_per_fringe_);
+    fringe_process_ptr_->create_fringe_image();
+    fringe_process_ptr_->create_graycode_image();
+
+    all_imgs_.clear();
+    auto gc_imgs = fringe_process_ptr_->get_gc_images(color_);
+    auto fr_imgs = fringe_process_ptr_->get_fr_images(color_);
+    all_imgs_.insert(all_imgs_.end(), gc_imgs.begin(), gc_imgs.end());
+    all_imgs_.insert(all_imgs_.end(), fr_imgs.begin(), fr_imgs.end());
+
+    RCLCPP_INFO(this->get_logger(), "Fringe patterns ready: %zu total (%zu GrayCode + %d Fringe)",
+                all_imgs_.size(), gc_imgs.size(), fringe_steps_);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Camera info callback
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Display timer (keeps OpenCV event loop alive while idle) ──────────────────
+
+void StereoFringeProcess::display_timer_cb()
+{
+    if (!acquiring_) {
+        cv::waitKey(1);
+    }
+}
+
+// ── Camera image callbacks – push to independent queues ───────────────────────
+
+void StereoFringeProcess::left_image_cb(
+    const sensor_msgs::msg::Image::ConstSharedPtr& msg)
+{
+    if (!acquiring_) return;
+    try {
+        cv::Mat img = cv_bridge::toCvShare(msg, "mono8")->image.clone();
+        {
+            std::lock_guard<std::mutex> lk(left_mtx_);
+            left_queue_.push(std::move(img));
+        }
+        left_cv_.notify_one();
+    } catch (const cv_bridge::Exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "left_image_cb cv_bridge: %s", e.what());
+    }
+}
+
+void StereoFringeProcess::right_image_cb(
+    const sensor_msgs::msg::Image::ConstSharedPtr& msg)
+{
+    if (!acquiring_) return;
+    try {
+        cv::Mat img = cv_bridge::toCvShare(msg, "mono8")->image.clone();
+        {
+            std::lock_guard<std::mutex> lk(right_mtx_);
+            right_queue_.push(std::move(img));
+        }
+        right_cv_.notify_one();
+    } catch (const cv_bridge::Exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "right_image_cb cv_bridge: %s", e.what());
+    }
+}
+
+// Blocking pop with timeout – mirrors stereoSystem.triggerAndReceive() semantics
+cv::Mat StereoFringeProcess::pop_left(std::chrono::milliseconds timeout)
+{
+    std::unique_lock<std::mutex> lk(left_mtx_);
+    if (!left_cv_.wait_for(lk, timeout,
+            [this]{ return !left_queue_.empty() || !acquiring_; })) {
+        return {};   // timeout
+    }
+    if (left_queue_.empty()) return {};  // acquiring_ went false
+    cv::Mat img = std::move(left_queue_.front());
+    left_queue_.pop();
+    return img;
+}
+
+cv::Mat StereoFringeProcess::pop_right(std::chrono::milliseconds timeout)
+{
+    std::unique_lock<std::mutex> lk(right_mtx_);
+    if (!right_cv_.wait_for(lk, timeout,
+            [this]{ return !right_queue_.empty() || !acquiring_; })) {
+        return {};
+    }
+    if (right_queue_.empty()) return {};
+    cv::Mat img = std::move(right_queue_.front());
+    right_queue_.pop();
+    return img;
+}
+
+// ── Camera info ───────────────────────────────────────────────────────────────
+
 void StereoFringeProcess::camera_info_cb(
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr msg)
 {
     if (receive_camera_info_) return;
-    fringe_process_ptr_->set_camera_resolution(cv::Size(msg->width, msg->height));
-    RCLCPP_INFO(this->get_logger(), "Camera resolution: %ux%u", msg->width, msg->height);
+    camera_resolution_ = cv::Size(msg->width, msg->height);
+    fringe_process_ptr_->set_camera_resolution(camera_resolution_);
+    RCLCPP_INFO(this->get_logger(), "Camera resolution registered: %ux%u", msg->width, msg->height);
     receive_camera_info_ = true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// process_srv_cb — starts the scan; returns immediately so callers don't block.
-// Listen to /fringe_status for "scan_complete" or "scan_error".
-// ─────────────────────────────────────────────────────────────────────────────
+// ── /phase_process service ────────────────────────────────────────────────────
+
 void StereoFringeProcess::process_srv_cb(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
     const std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
-    {
-        std::lock_guard<std::mutex> lk(scan_mtx_);
-        if (scan_state_ != ScanState::IDLE) {
-            response->success = false;
-            response->message = "Scan already in progress";
-            return;
-        }
-        if (!receive_camera_info_) {
-            response->success = false;
-            response->message = "Camera info not yet received";
-            return;
-        }
-        if (!trigger_client_->service_is_ready()) {
-            response->success = false;
-            response->message = "Trigger service not ready";
-            return;
-        }
-
-        // Cache parameters for this scan so we don't call get_parameter() in callbacks
-        cached_settle_ms_ = this->get_parameter("settle_ms").as_int();
-        cached_debug_     = this->get_parameter("debug").as_bool();
-        cached_color_     = this->get_parameter("image_color").as_string();
-
-        // Check if pattern parameters changed and rebuild if needed
-        int px_f  = this->get_parameter("pixel_per_fringe").as_int();
-        int steps = this->get_parameter("fringe_steps").as_int();
-        if (px_f != pixel_per_fringe || steps != fringe_steps) {
-            RCLCPP_INFO(this->get_logger(),
-                        "Rebuilding patterns: px_f=%d steps=%d", px_f, steps);
-            pixel_per_fringe = px_f;
-            fringe_steps     = steps;
-            fringe_process_ptr_->FringePattern::set_px_f(pixel_per_fringe);
-            fringe_process_ptr_->FringePattern::set_steps(fringe_steps);
-            fringe_process_ptr_->GrayCode::set_px_f(pixel_per_fringe);
-            fringe_process_ptr_->create_fringe_image();
-            fringe_process_ptr_->create_graycode_image();
-
-            auto gc_imgs = fringe_process_ptr_->get_gc_images(cached_color_);
-            auto fr_imgs = fringe_process_ptr_->get_fr_images(cached_color_);
-            all_imgs_.clear();
-            all_imgs_.push_back(black_img_);
-            all_imgs_.insert(all_imgs_.end(), gc_imgs.begin(), gc_imgs.end());
-            all_imgs_.insert(all_imgs_.end(), fr_imgs.begin(), fr_imgs.end());
-        }
-
-        fringe_process_ptr_->clear_images();
-        scan_index_ = 0;
-        scan_state_ = ScanState::SETTLING;
+    if (acquiring_) {
+        response->success = false;
+        response->message = "Acquisition already in progress";
+        return;
     }
 
-    // Publish black during warm-up, then kick off first pattern
-    RCLCPP_INFO(this->get_logger(),
-                "Scan started: %zu patterns, settle=%d ms",
-                all_imgs_.size() - 1, cached_settle_ms_);
+    if (!trigger_client_->service_is_ready()) {
+        response->success = false;
+        response->message = "Trigger service not ready";
+        return;
+    }
+
+    if (acquisition_thread_.joinable()) {
+        acquisition_thread_.join();
+    }
+
+    // Re-read parameters so they can be changed without restarting the node
+    int px_f  = this->get_parameter("pixel_per_fringe").as_int();
+    int steps = this->get_parameter("fringe_steps").as_int();
+    settle_ms_ = this->get_parameter("settle_ms").as_int();
+    color_     = this->get_parameter("image_color").as_string();
+
+    if (px_f != pixel_per_fringe_ || steps != fringe_steps_) {
+        pixel_per_fringe_ = px_f;
+        fringe_steps_     = steps;
+        rebuild_patterns();
+    }
+
+    // Drain stale frames from both queues before starting
+    { std::lock_guard<std::mutex> lk(left_mtx_);  while (!left_queue_.empty())  left_queue_.pop(); }
+    { std::lock_guard<std::mutex> lk(right_mtx_); while (!right_queue_.empty()) right_queue_.pop(); }
+
+    acquiring_ = true;
+    response->success = true;
+    response->message = "Acquisition started";
 
     auto status = std_msgs::msg::String();
     status.data = "scan_started";
     scan_done_pub_->publish(status);
 
-    response->success = true;
-    response->message = "Scan started; listen to /fringe_status for completion";
-
-    // Kick off the state machine — project pattern 0 (black warm-up)
-    advance_scan_step();
+    acquisition_thread_ = std::thread(&StereoFringeProcess::run_acquisition, this);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// advance_scan_step — project current pattern, arm settling one-shot timer
-// Must be called with scan_mtx_ NOT held (creates a timer internally).
-// ─────────────────────────────────────────────────────────────────────────────
-void StereoFringeProcess::advance_scan_step()
+// ── Acquisition loop ──────────────────────────────────────────────────────────
+
+void StereoFringeProcess::run_acquisition()
 {
-    // Project pattern at scan_index_
-    {
-        std::lock_guard<std::mutex> lk(scan_mtx_);
-        cv::imshow(window_name_, all_imgs_[scan_index_]);
-        // cv::waitKey(1) is called by the display timer, which runs concurrently.
-        // Call it here too so the OS compositor actually flips the buffer before
-        // the settling delay starts.
-        cv::waitKey(1);
-    }
+    RCLCPP_INFO(this->get_logger(), "Starting fringe scan (%zu patterns)…", all_imgs_.size());
+    auto t_start = std::chrono::steady_clock::now();
 
-    // Arm one-shot settling timer (cancels previous if any)
-    if (settling_timer_) {
-        settling_timer_->cancel();
-    }
-    settling_timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(cached_settle_ms_),
-        [this]() {
-            settling_timer_->cancel(); // one-shot: self-cancel
-            settling_done_cb();
-        },
-        srv_cb_group_);
-}
+    fringe_process_ptr_->clear_images();
+    const size_t total = all_imgs_.size();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// settling_done_cb — projector has had time to display the pattern; trigger now
-// ─────────────────────────────────────────────────────────────────────────────
-void StereoFringeProcess::settling_done_cb()
-{
-    {
-        std::lock_guard<std::mutex> lk(scan_mtx_);
-        scan_state_ = ScanState::WAITING_FOR_FRAME;
-    }
-    send_trigger();
-}
+    // Timeout per frame: 4× the camera period as generous headroom
+    const int camera_hz   = this->get_parameter("camera_hz").as_int();
+    const auto frame_timeout = std::chrono::milliseconds(
+        std::max(250, 4000 / std::max(camera_hz, 1)));
 
-// ─────────────────────────────────────────────────────────────────────────────
-// stereo_callback — image pair arrived after hardware trigger
-// ─────────────────────────────────────────────────────────────────────────────
-void StereoFringeProcess::stereo_callback(
-    const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
-    const sensor_msgs::msg::Image::ConstSharedPtr& right_msg)
-{
-    ScanState current_state;
-    int current_index;
-    {
-        std::lock_guard<std::mutex> lk(scan_mtx_);
-        current_state = scan_state_;
-        current_index = scan_index_;
-    }
+    for (size_t k = 0; k < total && acquiring_; ++k) {
 
-    if (current_state != ScanState::WAITING_FOR_FRAME) {
-        RCLCPP_DEBUG_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                              "stereo_callback: not waiting for frame (state=%d), ignoring",
-                              static_cast<int>(current_state));
-        return;
-    }
+        // 1. Project pattern k and wait for projector to settle
+        cv::imshow(window_name_, all_imgs_[k]);
+        cv::waitKey(settle_ms_);
 
-    try {
-        cv::Mat left  = cv_bridge::toCvShare(left_msg,  "mono8")->image;
-        cv::Mat right = cv_bridge::toCvShare(right_msg, "mono8")->image;
+        // 2. Send hardware / software trigger
+        send_trigger();
+
+        // 3. Block until one frame arrives on each camera (mirrors triggerAndReceive)
+        cv::Mat left  = pop_left(frame_timeout);
+        cv::Mat right = pop_right(frame_timeout);
 
         if (left.empty() || right.empty()) {
-            RCLCPP_WARN(this->get_logger(), "Empty frame received at index %d", current_index);
-            return;
-        }
+            if (!acquiring_) break;
+            RCLCPP_WARN(this->get_logger(),
+                        "Frame timeout at pattern %zu/%zu – re-triggering…", k + 1, total);
+            send_trigger();
+            left  = pop_left(frame_timeout);
+            right = pop_right(frame_timeout);
 
-        // index 0 is the black warm-up frame — skip saving it
-        if (current_index > 0) {
-            fringe_process_ptr_->set_images(left, right, current_index - 1);
-            RCLCPP_DEBUG(this->get_logger(),
-                         "Stored frame %d/%zu", current_index, all_imgs_.size() - 1);
-        }
-
-        // Advance to next pattern
-        int next_index;
-        {
-            std::lock_guard<std::mutex> lk(scan_mtx_);
-            scan_index_++;
-            next_index = scan_index_;
-
-            if (next_index >= static_cast<int>(all_imgs_.size())) {
-                // All patterns captured → transition to PROCESSING
-                scan_state_ = ScanState::PROCESSING;
-            } else {
-                scan_state_ = ScanState::SETTLING;
+            if (left.empty() || right.empty()) {
+                RCLCPP_ERROR(this->get_logger(),
+                             "Frame still missing after retry at step %zu. Skipping.", k + 1);
+                // Insert black frame to keep index alignment (same as stereo_fringe_main)
+                cv::Size cam_res = receive_camera_info_ ? camera_resolution_ : project_resolution_;
+                left  = cv::Mat::zeros(cam_res, CV_8UC1);
+                right = cv::Mat::zeros(cam_res, CV_8UC1);
             }
         }
 
-        if (next_index >= static_cast<int>(all_imgs_.size())) {
-            // ── Processing ─────────────────────────────────────────────────
-            RCLCPP_INFO(this->get_logger(),
-                        "All %zu patterns captured. Computing phase maps…",
-                        all_imgs_.size() - 1);
+        // 4. Feed into FringeProcess (stores internal copy)
+        fringe_process_ptr_->set_images(left, right, static_cast<int>(k));
 
-            // Show black while processing
-            cv::imshow(window_name_, black_img_);
-            cv::waitKey(1);
-
-            std::vector<cv::Mat> result;
-            try {
-                result = fringe_process_ptr_->calculate_abs_phi_images(false);
-            } catch (const std::exception& ex) {
-                RCLCPP_ERROR(this->get_logger(), "Phase computation failed: %s", ex.what());
-                auto status = std_msgs::msg::String();
-                status.data = "scan_error";
-                scan_done_pub_->publish(status);
-                std::lock_guard<std::mutex> lk(scan_mtx_);
-                scan_state_ = ScanState::IDLE;
-                return;
-            }
-
-            publish_processed_images(result);
-
-            auto status = std_msgs::msg::String();
-            status.data = "scan_complete";
-            scan_done_pub_->publish(status);
-            RCLCPP_INFO(this->get_logger(), "Scan complete — phase maps published.");
-
-            std::lock_guard<std::mutex> lk(scan_mtx_);
-            scan_state_ = ScanState::IDLE;
-        } else {
-            // ── Next pattern ────────────────────────────────────────────────
-            RCLCPP_DEBUG(this->get_logger(),
-                         "Pattern %d/%zu captured, projecting next…",
-                         current_index, all_imgs_.size() - 1);
-            advance_scan_step();
-        }
-
-    } catch (const cv_bridge::Exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "cv_bridge: %s", e.what());
+        RCLCPP_INFO(this->get_logger(), "  [%2zu/%zu] frame captured", k + 1, total);
     }
+
+    // Return projector to black
+    cv::imshow(window_name_, black_img_);
+    cv::waitKey(1);
+
+    double acq_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_start).count();
+    RCLCPP_INFO(this->get_logger(),
+                "Acquisition done in %.3f s (%.1f FPS). Computing phase…",
+                acq_s, total / std::max(acq_s, 0.001));
+
+    // 5. Phase computation
+    try {
+        auto results = fringe_process_ptr_->calculate_abs_phi_images(false);
+        publish_processed_images(results);
+
+        auto status = std_msgs::msg::String();
+        status.data = "scan_complete";
+        scan_done_pub_->publish(status);
+        RCLCPP_INFO(this->get_logger(), "Phase processing and publishing complete.");
+    } catch (const std::exception& ex) {
+        RCLCPP_ERROR(this->get_logger(), "Phase calculation error: %s", ex.what());
+        auto status = std_msgs::msg::String();
+        status.data = "scan_error";
+        scan_done_pub_->publish(status);
+    }
+
+    acquiring_ = false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// send_trigger — async, zero-blocking
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Trigger helper ────────────────────────────────────────────────────────────
+
 void StereoFringeProcess::send_trigger()
 {
     if (!trigger_client_->service_is_ready()) {
@@ -416,20 +411,18 @@ void StereoFringeProcess::send_trigger()
         [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
             auto resp = future.get();
             if (!resp->success) {
-                RCLCPP_ERROR(this->get_logger(), "Hardware trigger failed: %s",
-                             resp->message.c_str());
+                RCLCPP_ERROR(this->get_logger(), "Hardware trigger pulse returned failure!");
             }
         });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// publish_processed_images — {abs_phi_l, abs_phi_r, mod_l, mod_r}
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Result publishing ─────────────────────────────────────────────────────────
+
 void StereoFringeProcess::publish_processed_images(const std::vector<cv::Mat>& images)
 {
     if (images.size() < 4) {
         RCLCPP_WARN(this->get_logger(),
-                    "publish_processed_images: expected 4 images, got %zu", images.size());
+                    "publish_processed_images: expected 4, got %zu", images.size());
         return;
     }
 
@@ -440,7 +433,6 @@ void StereoFringeProcess::publish_processed_images(const std::vector<cv::Mat>& i
     hdr_l.frame_id = "Active/left_camera_link";
     hdr_r.frame_id = "Active/right_camera_link";
 
-    // Helper: normalize float mat to 8-bit and publish
     auto publish_norm = [&](rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub,
                              const cv::Mat& img, const std_msgs::msg::Header& hdr) {
         if (img.empty()) return;
@@ -451,33 +443,29 @@ void StereoFringeProcess::publish_processed_images(const std::vector<cv::Mat>& i
 
     try {
         // 64FC1 phase maps
-        pub_abs_left_->publish(
-            *cv_bridge::CvImage(hdr_l, "64FC1", images[0]).toImageMsg());
-        pub_abs_right_->publish(
-            *cv_bridge::CvImage(hdr_r, "64FC1", images[1]).toImageMsg());
+        pub_abs_left_->publish(*cv_bridge::CvImage(hdr_l, "64FC1", images[0]).toImageMsg());
+        pub_abs_right_->publish(*cv_bridge::CvImage(hdr_r, "64FC1", images[1]).toImageMsg());
 
-        // 8UC1 modulation maps
+        // 8UC1 modulation maps (normalised)
         publish_norm(pub_mod_left_,  images[2], hdr_l);
         publish_norm(pub_mod_right_, images[3], hdr_r);
 
-        if (cached_debug_) {
-            // Save absolute phi as text for offline inspection
+        bool debug = this->get_parameter("debug").as_bool();
+        if (debug) {
             if (this->get_parameter("save_image").as_bool()) {
                 fringe_process_ptr_->save_abs_phi_txt(images[0], "left_abs_phi.txt");
                 fringe_process_ptr_->save_abs_phi_txt(images[1], "right_abs_phi.txt");
             }
-            // Normalised debug views
             publish_norm(pub_abs_left_debug_,  images[0], hdr_l);
             publish_norm(pub_abs_right_debug_, images[1], hdr_r);
         }
     } catch (const cv_bridge::Exception& e) {
-        RCLCPP_ERROR(this->get_logger(), "cv_bridge in publish: %s", e.what());
+        RCLCPP_ERROR(this->get_logger(), "cv_bridge publishing error: %s", e.what());
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// save_img_srv_cb
-// ─────────────────────────────────────────────────────────────────────────────
+// ── /save_image service ───────────────────────────────────────────────────────
+
 void StereoFringeProcess::save_img_srv_cb(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
     const std::shared_ptr<std_srvs::srv::Trigger::Response> response)
@@ -494,31 +482,29 @@ void StereoFringeProcess::save_img_srv_cb(
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// project_cb — manual projection control for alignment / testing
-// ─────────────────────────────────────────────────────────────────────────────
+// ── /image_project service ────────────────────────────────────────────────────
+
 void StereoFringeProcess::project_cb(
     const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
     const std::shared_ptr<std_srvs::srv::SetBool::Response> response)
 {
-    std::lock_guard<std::mutex> lk(scan_mtx_);
-    if (scan_state_ != ScanState::IDLE) {
+    if (acquiring_) {
         response->success = false;
-        response->message = "Cannot change projection during an active scan";
+        response->message = "Cannot change manual projection during active scan";
         return;
     }
 
     if (request->data) {
-        scan_index_ = (scan_index_ + 1) % static_cast<int>(all_imgs_.size());
-        cv::imshow(window_name_, all_imgs_[scan_index_]);
+        manual_project_idx_ = (manual_project_idx_ + 1) % static_cast<int>(all_imgs_.size());
+        cv::imshow(window_name_, all_imgs_[manual_project_idx_]);
         cv::waitKey(1);
-        RCLCPP_INFO(this->get_logger(), "Manual projection: index %d/%zu",
-                    scan_index_, all_imgs_.size() - 1);
+        RCLCPP_INFO(this->get_logger(), "Manual projection pattern: %d / %zu",
+                    manual_project_idx_, all_imgs_.size());
     } else {
-        scan_index_ = 0;
+        manual_project_idx_ = 0;
         cv::imshow(window_name_, black_img_);
         cv::waitKey(1);
-        RCLCPP_INFO(this->get_logger(), "Manual projection: black (reset)");
+        RCLCPP_INFO(this->get_logger(), "Manual projection reset to black");
     }
     response->success = true;
 }
