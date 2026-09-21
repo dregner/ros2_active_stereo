@@ -81,7 +81,7 @@ target_include_directories(stereo_fringe_comp PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
-ament_target_dependencies(stereo_fringe_comp  rclcpp rclcpp_components sensor_msgs std_srvs message_filters cv_bridge image_transport ros2_active_stereo_msgs)
+ament_target_dependencies(stereo_fringe_comp  rclcpp rclcpp_components sensor_msgs std_srvs cv_bridge image_transport ros2_active_stereo_msgs)
 target_link_libraries(stereo_fringe_comp  ${X11_LIBRARIES}  ${X11_Xinerama_LIB}  ${OpenCV_LIBS})
 rclcpp_components_register_nodes(stereo_fringe_comp PLUGIN "ros2_active_stereo::StereoFringeProcess" EXECUTABLE stereo_fringe_node)
 
@@ -115,6 +115,7 @@ install(
     scripts/triangulation_correl_node.py
     scripts/SpatialCorrelation_pytorch.py
     scripts/phase_processing_node.py
+    scripts/external_acquire_node.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
