@@ -98,22 +98,22 @@ StereoFringeProcess::StereoFringeProcess(const rclcpp::NodeOptions & options)
         "image_project",
         std::bind(&StereoFringeProcess::project_cb, this,
                   std::placeholders::_1, std::placeholders::_2),
-        rclcpp::ServicesQoS(), srv_cb_group_);
+        rmw_qos_profile_services_default, srv_cb_group_);
 
     process_service_ = this->create_service<std_srvs::srv::Trigger>(
         "phase_process",
         std::bind(&StereoFringeProcess::process_srv_cb, this,
                   std::placeholders::_1, std::placeholders::_2),
-        rclcpp::ServicesQoS(), srv_cb_group_);
+        rmw_qos_profile_services_default, srv_cb_group_);
 
     save_imgs_service_ = this->create_service<std_srvs::srv::Trigger>(
         "save_image",
         std::bind(&StereoFringeProcess::save_img_srv_cb, this,
                   std::placeholders::_1, std::placeholders::_2),
-        rclcpp::ServicesQoS(), srv_cb_group_);
+        rmw_qos_profile_services_default, srv_cb_group_);
 
     trigger_client_ = this->create_client<std_srvs::srv::Trigger>(
-        "trigger", rclcpp::ServicesQoS(), srv_cb_group_);
+        "trigger", rmw_qos_profile_services_default, srv_cb_group_);
 
     // ── Display Timer ─────────────────────────────────────────────────────
     display_timer_ = this->create_wall_timer(
