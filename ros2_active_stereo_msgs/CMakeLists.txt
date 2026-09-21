@@ -30,6 +30,7 @@ ament_auto_find_build_dependencies()
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ActiveStatus.msg"
   "srv/MoveMotor.srv"
+  "srv/ProcessFolder.srv"
   DEPENDENCIES builtin_interfaces sensor_msgs std_msgs
 )
 
