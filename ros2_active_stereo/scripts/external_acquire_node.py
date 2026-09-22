@@ -69,21 +69,24 @@ class ProcessPhase(Node):
         self.declare_parameter(
             "config_path",
             f"/home/{os.getenv('USER')}/fringe-projection/config/stereo_config.yaml")
-        self.declare_parameter("use_gpio",         False)
+        self.declare_parameter("use_gpio",         True)
         self.declare_parameter("save_raw_frames",  True)
         self.declare_parameter("binary_timeout_s", 120.0)
 
         # fringe_capture section (mirrored in YAML)
-        self.declare_parameter("pixels_per_fringe",      32)
+        self.declare_parameter("pixels_per_fringe",      64)
         self.declare_parameter("n_steps",                  8)
-        self.declare_parameter("projector_display_ms",    100)
+        self.declare_parameter("projector_display_ms",    50)
         self.declare_parameter("projector_monitor_name", "DP-1")
         self.declare_parameter("projector_window_name",  "Projector")
-        self.declare_parameter("proj_width",            1600)
-        self.declare_parameter("proj_height",           2560)
-        self.declare_parameter("cam_width",              720)
-        self.declare_parameter("cam_height",             540)
+        self.declare_parameter("proj_width",            1920)
+        self.declare_parameter("proj_height",           1080)
+        self.declare_parameter("cam_width",              2448)
+        self.declare_parameter("cam_height",             2048)
 
+        self.declare_parameter("zncc_n_imgs", 5)
+        self.declare_parameter("zncc_steps", 20)
+        self.declare_parameter("zncc_warminig", 0)
         # Debug
         self.declare_parameter("debug_show", True)
 
@@ -186,6 +189,9 @@ class ProcessPhase(Node):
             cam_width              = int(self.get_parameter("cam_width").value),
             cam_height             = int(self.get_parameter("cam_height").value),
             debug_show             = bool(self.get_parameter("debug_show").value),
+            zncc_n_img             = int(self.get_parameter("zncc_n_imgs").value),
+            zncc_steps             = int(self.get_parameter("zncc_steps").value),
+            zncc_warmup             = int(self.get_parameter("zncc_warminig").value)
         )
 
     def _write_yaml(self, p: dict, output_dir: str) -> None:
@@ -211,6 +217,11 @@ class ProcessPhase(Node):
             "projector_monitor_name": p["projector_monitor_name"],
             "output_dir":             output_dir,
             "save_raw_frames":        p["save_raw_frames"],
+            "zncc": {
+                "num_images":           p["zncc_n_img"],
+                "motor_steps":          p["zncc_steps"],
+                "warmup_triggers":      p["zncc_warmup"],
+            }
         }
 
         with open(config_path, "w") as fh:
@@ -266,9 +277,9 @@ class ProcessPhase(Node):
 
                 self._publish_state("ZNCC_ACQUIRING")
                 
-                num_images = 10
-                steps = 20
-                warmup_triggers = 2
+                num_images = p["zncc_n_img"]
+                steps = p["zncc_steps"]
+                warmup_triggers = p["zncc_warmup"]
                 
                 self._acquire_done_event.clear()
                 if self._proc and self._proc.stdin:
@@ -291,8 +302,9 @@ class ProcessPhase(Node):
         response.success = True
         response.message = "ZNCC Acquisition started."
         return response
+
     def _run_acquisition_callback(self, request: ProcessFolder.Request, response: ProcessFolder.Response):
-        folder = request.folder_path.strip() or f"/home/{os.getenv('USER')}/fringe_results"
+        folder = request.folder_path.strip() or f"/home/{os.getenv('USER')}/active_results"
         self.get_logger().info(f"/run_acquisition called → output_dir={folder!r}")
 
         if not self._pipeline_lock.acquire(blocking=False):
@@ -310,7 +322,7 @@ class ProcessPhase(Node):
     def _pipeline_worker(self, output_dir: str) -> None:
         try:
             p = self._read_params()
-            self.stereo_processor = FringeProcess(img_resolution=(p["proj_width"], p["proj_height"]), camera_resolution=(p["cam_height"], p["cam_width"]), px_f=p["pixels_per_fringe"], steps=p["n_steps"])
+            self.stereo_processor = FringeProcess(img_resolution=(p["proj_width"], p["proj_height"]), camera_resolution=(p["cam_width"], p["cam_height"]), px_f=p["pixels_per_fringe"], steps=p["n_steps"])
             
             self._publish_state("CONFIGURING")
             os.makedirs(output_dir, exist_ok=True)
@@ -333,11 +345,11 @@ class ProcessPhase(Node):
             self.get_logger().info("C++ acquisition completed successfully.")
 
             self._publish_state("PROCESSING")
-            left_images = sorted(os.listdir(os.path.join(output_dir, "left")))
-            right_images = sorted(os.listdir(os.path.join(output_dir, "right")))
+            left_images = sorted(os.listdir(os.path.join(output_dir,'fringe', "left")))
+            right_images = sorted(os.listdir(os.path.join(output_dir,'fringe', "right")))
             for idx, (left, right) in enumerate(zip(left_images, right_images)):
-                self.stereo_processor.set_images(image_left=self.load_image(os.path.join(output_dir, "left", left)),
-                                               image_right=self.load_image(os.path.join(output_dir, "right", right)),
+                self.stereo_processor.set_images(image_left=self.load_image(os.path.join(output_dir,'fringe', "left", left)),
+                                               image_right=self.load_image(os.path.join(output_dir,'fringe', "right", right)),
                                                counter=idx)
 
             abs_phi_l, abs_phi_r, mod_l, mod_r = self.stereo_processor.calculate_abs_phi_images()
