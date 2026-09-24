@@ -99,9 +99,9 @@ class ProcessPhase(Node):
         self._pub_dbg_right  = self.create_publisher(Image, "sync/right/debug/phase_map", 10)
 
         # Services ─────────────────────────────────────────────────────────────
-        self.create_service(ProcessFolder, "run_acquisition", self._run_acquisition_callback)
+        self.create_service(ProcessFolder, "run_acquisition", self._fringe_acquisition_callback)
         self.create_service(Trigger,       "reconfigure",     self._reconfigure_callback)
-        self.create_service(SetBool,       "correlation_process", self._correlation_process_callback)
+        self.create_service(SetBool,       "correlation_process", self._laser_acquisition_callback)
 
         self._proc = None
         self._acquire_done_event = threading.Event()
@@ -233,7 +233,7 @@ class ProcessPhase(Node):
         try:
             p = self._read_params()
             cfg_path = p["config_path"]
-            current_output_dir = f"/home/{os.getenv('USER')}/fringe_results"
+            current_output_dir = f"/home/{os.getenv('USER')}/active_results"
             if os.path.isfile(cfg_path):
                 with open(cfg_path, "r") as fh:
                     existing = yaml.safe_load(fh) or {}
@@ -255,7 +255,7 @@ class ProcessPhase(Node):
         return response
 
 
-    def _correlation_process_callback(self, request: SetBool.Request, response: SetBool.Response):
+    def _laser_acquisition_callback(self, request: SetBool.Request, response: SetBool.Response):
         if not request.data:
             response.success = False
             response.message = "Ignored"
@@ -283,7 +283,7 @@ class ProcessPhase(Node):
                 
                 self._acquire_done_event.clear()
                 if self._proc and self._proc.stdin:
-                    self._proc.stdin.write(f"ZNCC {out_dir} {num_images} {steps} {warmup_triggers}\n")
+                    self._proc.stdin.write(f"LASER {out_dir}\n")
                     self._proc.stdin.flush()
                 
                 if not self._acquire_done_event.wait(timeout=120.0):
@@ -303,7 +303,7 @@ class ProcessPhase(Node):
         response.message = "ZNCC Acquisition started."
         return response
 
-    def _run_acquisition_callback(self, request: ProcessFolder.Request, response: ProcessFolder.Response):
+    def _fringe_acquisition_callback(self, request: ProcessFolder.Request, response: ProcessFolder.Response):
         folder = request.folder_path.strip() or f"/home/{os.getenv('USER')}/active_results"
         self.get_logger().info(f"/run_acquisition called → output_dir={folder!r}")
 
@@ -335,7 +335,7 @@ class ProcessPhase(Node):
             
             self._acquire_done_event.clear()
             if self._proc and self._proc.stdin:
-                self._proc.stdin.write(f"ACQUIRE {output_dir}\n")
+                self._proc.stdin.write(f"FRINGE {output_dir}\n")
                 self._proc.stdin.flush()
             
             # Wait for acquisition to finish
