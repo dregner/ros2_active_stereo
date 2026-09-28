@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+import datetime
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -9,6 +11,7 @@ from std_srvs.srv import Trigger, Empty
 import struct
 import time
 import tf2_ros
+from ros2_active_stereo_msgs.srv import ProcessFolder
 from sensor_msgs.msg import PointCloud2
 import sensor_msgs_py.point_cloud2 as pc2
 from geometry_msgs.msg import TransformStamped, PoseStamped, PoseWithCovarianceStamped
@@ -24,22 +27,20 @@ class TriangulationNode(Node):
         super().__init__('triangulation_node')
 
         self.bridge = CvBridge()
-
-
       
 
         # Subscribers de tópicos de imagem e camera_info
-        self.create_subscription(Image, 'abs_phi_left', lambda msg: self.image_callback(msg, 'sync/left/phase_map'), 10)
-        self.create_subscription(Image, 'abs_phi_right', lambda msg: self.image_callback(msg, 'sync/right/phase_map'), 10)
-        self.create_subscription(Image, 'mask_left', lambda msg: self.image_callback(msg, 'sync/left/modulation_map'), 10)
-        self.create_subscription(Image, 'mask_right', lambda msg: self.image_callback(msg, 'sync/right/modulation_map'), 10)
+        self.create_subscription(Image, 'sync/left/phase_map', lambda msg: self.image_callback(msg, 'sync/left/phase_map'), 10)
+        self.create_subscription(Image, 'sync/right/phase_map', lambda msg: self.image_callback(msg, 'sync/right/phase_map'), 10)
+        self.create_subscription(Image, 'sync/left/modulation_map', lambda msg: self.image_callback(msg, 'sync/left/modulation_map'), 10)
+        self.create_subscription(Image, 'sync/right/modulation_map', lambda msg: self.image_callback(msg, 'sync/right/modulation_map'), 10)
 
         # Publisher de nuvem de pontos
         self.pointcloud_publisher = self.create_publisher(PointCloud2, 'pointcloud', 10)
 
         # Parameters
-        self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_fringe_projection/params/SM4.yaml')
-        self.declare_parameter('mod_thresh', 50) #cupy 0.07. torch (0-255)
+        self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_active_stereo/params/lab_active.yaml')
+        self.declare_parameter('mod_thresh', 30) #cupy 0.07. torch (0-255)
         self.declare_parameter('rad_tresh', 0.05) #threshold for radian difference
         self.declare_parameter('debug_save_points', False)
         self.declare_parameter('save_filename', 'fringe_points')
@@ -48,6 +49,7 @@ class TriangulationNode(Node):
         self.declare_parameter('neighbours', 5)
         self.declare_parameter('radius', 10)
         self.declare_parameter('ekf', False)
+        self.declare_parameter('save_images', False)
 
         self.zmin = -self.get_parameter('zval').get_parameter_value().integer_value
         self.zmax = self.get_parameter('zval').get_parameter_value().integer_value
@@ -64,15 +66,15 @@ class TriangulationNode(Node):
         self.process_triang = False
         # Services
         self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
-        self.phase_process = self.create_client(Trigger, 'phase_process')
+        self.phase_process = self.create_client(ProcessFolder, 'fringe_acquisition')
 
         sub_profile = rclpy.qos.QoSProfile(reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=5)
 
         self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, sub_profile)
         if(self.get_parameter('ekf').get_parameter_value().bool_value):
-            self.pose_sub = self.create_subscription(PoseStamped, '/mavros/local_position/pose', self.pose_cb, sub_profile)
+            self.pose_sub = self.create_subscription(PoseStamped, 'pose', self.pose_cb, sub_profile)
         else:
-            self.pose_sub = self.create_subscription(PoseWithCovarianceStamped, '/mavros/vision_pose/pose', self.pose_cb, sub_profile)
+            self.pose_sub = self.create_subscription(PoseWithCovarianceStamped, 'pose_cov', self.pose_cb, sub_profile)
             
         self.pose_msg = None
 
@@ -85,8 +87,18 @@ class TriangulationNode(Node):
         if not self.process_triang:
             self.pose_msg = msg
 
-    def _phase_process(self):
-        request = Trigger.Request()
+    def save_pose(self):
+        p = self.pose_msg.pose.pose.position
+        q = self.pose_msg.pose.pose.orientation
+        t = self.pose_msg.header.stamp.sec + self.pose_msg.header.stamp.nanosec * 1e-9
+
+        # 1 row with 8 columns: [timestamp, x, y, z, qx, qy, qz, qw]
+        return np.array([[t, p.x, p.y, p.z, q.x, q.y, q.z, q.w]], dtype=np.float64)
+
+    
+    def _phase_process(self, folder):
+        request = ProcessFolder.Request()
+        request.folder_path = folder
         future = self.phase_process.call_async(request)
         future.add_done_callback(self._phase_callback)
     
@@ -100,7 +112,13 @@ class TriangulationNode(Node):
     def process_sm4_callback(self, request, response):
         self.get_logger().info('Start processing phase')
         self.process_triang = True
-        self._phase_process()
+        save_imgs = bool(self.get_parameter('save_images').value)
+        if save_imgs:
+            self.folder = f"/home/{os.getenv('USER')}/Pictures/active_stereo/{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
+            self._phase_process(self.folder)
+        else:
+            self.folder = '/home/jetson/active_results'
+            self._phase_process(self.folder)
         return response
     
     def image_callback(self, msg, image_type):
@@ -127,7 +145,9 @@ class TriangulationNode(Node):
         left_images = np.asarray([self.images['sync/left/phase_map'], self.images['sync/left/modulation_map']])
         right_images = np.asarray([self.images['sync/right/phase_map'], self.images['sync/right/modulation_map']])
         self.zscan.convert_images(left_images, right_images, apply_clahe=False, undist=True)
-        self.triangulation()
+        data = self.save_pose()
+        np.savetxt(os.path.join(self.folder,'fringe', 'pose.txt'),data, fmt="%.6f", delimiter=",")
+        # self.triangulation()
 
     def triangulation(self):
         """
@@ -148,7 +168,7 @@ class TriangulationNode(Node):
 
         GRID_LIMITS = {'x': (-200, 600), 'y': (-200, 600), 'z': (self.zmin, self.zmax)}
         GRID_STEPS_1 = {'xy': 2.0, 'z': 1.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.1} # second steps of 3d patch
+        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.25} # second steps of 3d patch
         
         self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
 

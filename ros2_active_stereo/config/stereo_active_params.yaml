@@ -1,0 +1,63 @@
+/**/acquisition_node:
+  ros__parameters:
+    # C++ executable parameters
+    binary_path: "/home/jetson/fringe-projection/build/stereo_fringe"
+    config_path: "/home/jetson/fringe-projection/config/stereo_config.yaml"
+    use_gpio: true
+    save_raw_frames: true
+    binary_timeout_s: 120.0
+
+    # Fringe projection parameters
+    pixels_per_fringe: 64
+    n_steps: 8
+    projector_display_ms: 50
+    projector_monitor_name: "DP-1"
+    projector_window_name: "Projector"
+    proj_width: 1920
+    proj_height: 1080
+    cam_width: 2448
+    cam_height: 2048
+
+    # Stereo correlation parameters
+    zncc_n_imgs: 5
+    zncc_steps: 20
+    zncc_warminig: 0
+
+    # Debug
+    debug_show: true
+
+/**/triangulation_fringe_node:
+  ros__parameters:
+    yaml_path: "/home/jetson/ros2_ws/src/ros2_active_stereo/ros2_active_stereo/config/lab_active.yaml"
+    tile: 1
+    climp: 5.0
+    window_size: 3
+    stride: 1
+    threshold: 0.7
+    std_thresh: 20
+    radius: 10
+    neighbours: 10
+    crop_image_factor: 0.9
+    save_filename: "correlation_points"
+    debug_save_points: false
+    n_images: 10
+    camera_frame_id: "Active/left_camera_link"
+    zval: 300
+
+/**/triangulation_correl_node:
+  ros__parameters:
+    yaml_path: "/home/jetson/ros2_ws/src/ros2_active_stereo/ros2_active_stereo/config/lab_active.yaml"
+    tile: 2
+    climp: 8.0
+    window_size: 3
+    stride: 1
+    threshold: 0.7
+    std_thresh: 20
+    radius: 10
+    neighbours: 10
+    crop_image_factor: 0.9
+    save_filename: "correlation_points"
+    debug_save_points: false
+    n_images: 10
+    camera_frame_id: "Active/left_camera_link"
+    zval: 300

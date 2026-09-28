@@ -1,27 +1,4 @@
 #!/usr/bin/env python3
-"""
-phase_processing_node.py
-========================
-Unified ROS 2 node for structured-light active-stereo fringe projection.
-
-Architecture
-------------
-The heavy lifting (projector control, camera triggering, fringe/GrayCode
-generation, and phase computation) is done by the standalone C++ binary
-``stereo_fringe_main``, which runs **outside** ROS to minimise
-projection/acquisition latency and avoid shadows from ROS message passing.
-
-This node's responsibilities:
-  1. IDLE  – wait for acquisition requests.
-  2. /run_acquisition  – send ACQUIRE to the C++ binary.
-  3. Load the EXR result files written by the binary:
-        <output_dir>/phase_map_left.exr
-        <output_dir>/phase_map_right.exr
-        <output_dir>/modulation_left.exr
-        <output_dir>/modulation_right.exr
-  4. Publish them as ROS images on standard topics.
-  5. Return to IDLE.
-"""
 
 import os
 import subprocess
@@ -36,11 +13,10 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
-from std_srvs.srv import Trigger
-from std_srvs.srv import SetBool
+from std_srvs.srv import Trigger, SetBool
+from ros2_active_stereo_msgs.srv import ProcessFolder, MoveMotor  # type: ignore
 from fringe_process import FringeProcess   # type: ignore
 
-from ros2_active_stereo_msgs.srv import ProcessFolder  # type: ignore
 
 
 # ── Node ──────────────────────────────────────────────────────────────────────
@@ -57,26 +33,22 @@ class ProcessPhase(Node):
         self.stereo_processor = None  # type: ignore
 
         # State ────────────────────────────────────────────────────────────────
-        self._state_pub = self.create_publisher(String, "state_process_phase", 10)
+        self._state_pub = self.create_publisher(String, "state_acquisition_process", 10)
         self._current_state = "UNCONFIGURED"
         self._publish_state(self._current_state)
         self.create_timer(0.5, self._publish_state_periodically)
 
-        # Parameters ───────────────────────────────────────────────────────────
-        self.declare_parameter(
-            "binary_path",
-            f"/home/{os.getenv('USER')}/fringe-projection/build/stereo_fringe")
-        self.declare_parameter(
-            "config_path",
-            f"/home/{os.getenv('USER')}/fringe-projection/config/stereo_config.yaml")
+        # C++ executable parameters
+        self.declare_parameter("binary_path", f"/home/{os.getenv('USER')}/fringe-projection/build/stereo_fringe")
+        self.declare_parameter( "config_path", f"/home/{os.getenv('USER')}/fringe-projection/config/stereo_config.yaml")
         self.declare_parameter("use_gpio",         True)
         self.declare_parameter("save_raw_frames",  True)
         self.declare_parameter("binary_timeout_s", 120.0)
 
-        # fringe_capture section (mirrored in YAML)
+        # Fringe projection Paramters
         self.declare_parameter("pixels_per_fringe",      64)
         self.declare_parameter("n_steps",                  8)
-        self.declare_parameter("projector_display_ms",    50)
+        self.declare_parameter("projector_display_ms",    40)
         self.declare_parameter("projector_monitor_name", "DP-1")
         self.declare_parameter("projector_window_name",  "Projector")
         self.declare_parameter("proj_width",            1920)
@@ -84,25 +56,30 @@ class ProcessPhase(Node):
         self.declare_parameter("cam_width",              2448)
         self.declare_parameter("cam_height",             2048)
 
+        # Stereo correlation parameters
         self.declare_parameter("zncc_n_imgs", 5)
         self.declare_parameter("zncc_steps", 20)
         self.declare_parameter("zncc_warminig", 0)
+
         # Debug
         self.declare_parameter("debug_show", True)
 
+        
         # Publishers ───────────────────────────────────────────────────────────
-        self._pub_phi_left   = self.create_publisher(Image, "sync/left/phase_map",       10)
-        self._pub_phi_right  = self.create_publisher(Image, "sync/right/phase_map",      10)
-        self._pub_mod_left   = self.create_publisher(Image, "sync/left/modulation_map",  10)
-        self._pub_mod_right  = self.create_publisher(Image, "sync/right/modulation_map", 10)
-        self._pub_dbg_left   = self.create_publisher(Image, "sync/left/debug/phase_map",  10)
-        self._pub_dbg_right  = self.create_publisher(Image, "sync/right/debug/phase_map", 10)
+        self._pub_phi_left   = self.create_publisher(Image, "sync/left/phase_map",       5)
+        self._pub_phi_right  = self.create_publisher(Image, "sync/right/phase_map",      5)
+        self._pub_mod_left   = self.create_publisher(Image, "sync/left/modulation_map",  5)
+        self._pub_mod_right  = self.create_publisher(Image, "sync/right/modulation_map", 5)
+        self._pub_dbg_left   = self.create_publisher(Image, "sync/left/debug/phase_map",  5)
+        self._pub_dbg_right  = self.create_publisher(Image, "sync/right/debug/phase_map", 5)
+
 
         # Services ─────────────────────────────────────────────────────────────
-        self.create_service(ProcessFolder, "run_acquisition", self._fringe_acquisition_callback)
-        self.create_service(Trigger,       "reconfigure",     self._reconfigure_callback)
-        self.create_service(SetBool,       "correlation_process", self._laser_acquisition_callback)
-
+        self.create_service(ProcessFolder, "fringe_acquisition", self._fringe_acquisition_callback)
+        self.create_service(Trigger, "reconfigure", self._reconfigure_callback)
+        self.create_service(ProcessFolder, "laser_acquisition", self._laser_acquisition_callback)
+        self.create_service(MoveMotor, "move_motor", self.move_motor_callback)
+        self.create_service(SetBool, "laser", self.laser_callback)
         self._proc = None
         self._acquire_done_event = threading.Event()
         self._start_cpp_process()
@@ -145,7 +122,7 @@ class ProcessPhase(Node):
                 for line in self._proc.stdout:
                     clean_line = line.rstrip()
                     self.get_logger().info(f"[stereo_fringe] {clean_line}")
-                    if "[Pipeline] ACQUIRE_DONE" in clean_line or "[Pipeline] ZNCC_DONE" in clean_line:
+                    if "[Pipeline] FRINGE_DONE" in clean_line or "[Pipeline] CORRELATION_DONE" in clean_line or "[Pipeline] MOTOR_DONE" in clean_line or "[Pipeline] LASER_DONE":
                         self._acquire_done_event.set()
         
         threading.Thread(target=log_stdout, daemon=True).start()
@@ -254,55 +231,6 @@ class ProcessPhase(Node):
             response.message = str(exc)
         return response
 
-
-    def _laser_acquisition_callback(self, request: SetBool.Request, response: SetBool.Response):
-        if not request.data:
-            response.success = False
-            response.message = "Ignored"
-            return response
-            
-        if not self._pipeline_lock.acquire(blocking=False):
-            response.success = False
-            response.message = "Acquisition already running."
-            return response
-
-        def worker():
-            try:
-                p = self._read_params()
-                out_dir = f"/tmp/rrp_stereo"
-                os.makedirs(out_dir, exist_ok=True)
-                
-                if self._proc is None or self._proc.poll() is not None:
-                    self._start_cpp_process()
-
-                self._publish_state("ZNCC_ACQUIRING")
-                
-                num_images = p["zncc_n_img"]
-                steps = p["zncc_steps"]
-                warmup_triggers = p["zncc_warmup"]
-                
-                self._acquire_done_event.clear()
-                if self._proc and self._proc.stdin:
-                    self._proc.stdin.write(f"LASER {out_dir}\n")
-                    self._proc.stdin.flush()
-                
-                if not self._acquire_done_event.wait(timeout=120.0):
-                    raise RuntimeError("C++ ZNCC binary timed out.")
-                
-                self.get_logger().info("C++ ZNCC acquisition completed successfully.")
-            except Exception as exc:
-                self.get_logger().error(f"ZNCC Pipeline error: {exc}")
-                if self._proc and self._proc.poll() is not None:
-                     self._proc = None
-            finally:
-                self._pipeline_lock.release()
-                self._publish_state("IDLE")
-
-        threading.Thread(target=worker, daemon=True).start()
-        response.success = True
-        response.message = "ZNCC Acquisition started."
-        return response
-
     def _fringe_acquisition_callback(self, request: ProcessFolder.Request, response: ProcessFolder.Response):
         folder = request.folder_path.strip() or f"/home/{os.getenv('USER')}/active_results"
         self.get_logger().info(f"/run_acquisition called → output_dir={folder!r}")
@@ -312,14 +240,147 @@ class ProcessPhase(Node):
             response.message = "Acquisition already running."
             return response
 
-        t = threading.Thread(target=self._pipeline_worker, args=(folder,), daemon=True)
+        t = threading.Thread(target=self._fringe_worker, args=(folder,), daemon=True)
         t.start()
 
         response.success = True
         response.message = "Acquisition started."
         return response
 
-    def _pipeline_worker(self, output_dir: str) -> None:
+    def _laser_acquisition_callback(self, request: ProcessFolder.Request, response: ProcessFolder.Response):
+        folder = request.folder_path.strip() or f"/home/{os.getenv('USER')}/active_results"
+        self.get_logger().info(f"/run_acquisition called → output_dir={folder!r}")
+
+        if not self._pipeline_lock.acquire(blocking=False):
+            response.success = False
+            response.message = "Acquisition already running."
+            return response
+
+        t = threading.Thread(target=self._laser_worker, args=(folder,), daemon=True)
+        t.start()
+
+        response.success = True
+        response.message = "Acquisition started."
+        return response
+
+    def move_motor_callback(self, request: MoveMotor.Request, response: MoveMotor.Response):
+        self.get_logger().info(f"Moving motor to {request.angle} degrees")
+        angle = request.angle
+        
+        if not self._pipeline_lock.acquire(blocking=False):
+            response.success = False
+            return response
+
+        t = threading.Thread(target=self._movemotor, args=(angle,), daemon=True)
+        t.start()
+        response.success = True
+        return response
+
+    def laser_callback(self, request: SetBool.Request, response: SetBool.Response):
+        self.get_logger().info(f"Laser {request.data}")
+        state = request.data
+        if not self._pipeline_lock.acquire(blocking=False):
+            response.success = False
+            response.message = "Process running."
+            return response
+
+        t = threading.Thread(target=self._laser_mode, args=(state,), daemon=True)
+        t.start()
+        response.success = True
+        response.message = f"Laser: {state}"
+        return response
+    
+    def _movemotor(self, angle):
+        try:
+            p = self._read_params()
+            self._publish_state("MOVING MOTOR")
+            if self._proc is None or self._proc.poll() is not None:
+                self._start_cpp_process()
+
+            self._acquire_done_event.clear()
+            if self._proc and self._proc.stdin:
+                self._proc.stdin.write(f"MOTOR {angle}\n")
+                self._proc.stdin.flush()
+            
+                        # Wait for acquisition to finish
+            if not self._acquire_done_event.wait(timeout=p["binary_timeout_s"]):
+                raise RuntimeError(f"C++ binary timed out after {p['binary_timeout_s']} s.")
+            self._publish_state("TURN LASER MOTOR")
+        except Exception as exc:
+            self.get_logger().error(f"Pipeline error: {exc}")
+            self._publish_state("ERROR")
+            if self._proc and self._proc.poll() is not None:
+                self._proc = None # Reset process if it crashed
+        finally:
+            self._pipeline_lock.release()
+            self._publish_state("IDLE")
+
+    def _laser_mode(self, state):
+        try:
+            p = self._read_params()
+            self._publish_state("TURN LASER")
+            if self._proc is None or self._proc.poll() is not None:
+                self._start_cpp_process()
+            self._acquire_done_event.clear()
+            if self._proc and self._proc.stdin:
+                self._proc.stdin.write(f"LASER {int(state)}\n")
+                self._proc.stdin.flush()
+            
+                        # Wait for acquisition to finish
+            if not self._acquire_done_event.wait(timeout=p["binary_timeout_s"]):
+                raise RuntimeError(f"C++ binary timed out after {p['binary_timeout_s']} s.")
+        
+            self.get_logger().info("C++ movement complete succesfully")
+        except Exception as exc:
+            self.get_logger().error(f"Pipeline error: {exc}")
+            self._publish_state("ERROR")
+            if self._proc and self._proc.poll() is not None:
+                self._proc = None # Reset process if it crashed
+        finally:
+            self._pipeline_lock.release()
+            self._publish_state("IDLE")
+
+    def _laser_worker(self, output_dir: str):
+        try:
+            p = self._read_params()
+        
+            self._publish_state("CONFIGURING")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            if self._proc is None or self._proc.poll() is not None:
+                self._start_cpp_process()
+
+            self._publish_state("ZNCC_ACQUIRING")
+            
+            num_images = p["zncc_n_img"]
+            steps = p["zncc_steps"]
+            warmup_triggers = p["zncc_warmup"]
+            
+            self._acquire_done_event.clear()
+            if self._proc and self._proc.stdin:
+                self._proc.stdin.write(f"CORRELATION {output_dir}\n")
+                self._proc.stdin.flush()
+            
+                        # Wait for acquisition to finish
+            if not self._acquire_done_event.wait(timeout=p["binary_timeout_s"]):
+                raise RuntimeError(f"C++ binary timed out after {p['binary_timeout_s']} s.")
+            
+            self.get_logger().info("C++ acquisition completed successfully.")
+
+            self._publish_state("PROCESSING")
+            left_images = sorted(os.listdir(os.path.join(output_dir,'laser', "left")))
+            right_images = sorted(os.listdir(os.path.join(output_dir,'laser', "right")))
+            # self.get_logger().info(f'{left_images},{right_images}')
+        except Exception as exc:
+            self.get_logger().error(f"Pipeline error: {exc}")
+            self._publish_state("ERROR")
+            if self._proc and self._proc.poll() is not None:
+                 self._proc = None # Reset process if it crashed
+        finally:
+            self._pipeline_lock.release()
+            self._publish_state("IDLE")
+
+    def _fringe_worker(self, output_dir: str) -> None:
         try:
             p = self._read_params()
             self.stereo_processor = FringeProcess(img_resolution=(p["proj_width"], p["proj_height"]), camera_resolution=(p["cam_width"], p["cam_height"]), px_f=p["pixels_per_fringe"], steps=p["n_steps"])
@@ -331,7 +392,7 @@ class ProcessPhase(Node):
             if self._proc is None or self._proc.poll() is not None:
                 self._start_cpp_process()
 
-            self._publish_state("ACQUIRING")
+            self._publish_state("FRINGE_ACQUIRING")
             
             self._acquire_done_event.clear()
             if self._proc and self._proc.stdin:
@@ -347,6 +408,8 @@ class ProcessPhase(Node):
             self._publish_state("PROCESSING")
             left_images = sorted(os.listdir(os.path.join(output_dir,'fringe', "left")))
             right_images = sorted(os.listdir(os.path.join(output_dir,'fringe', "right")))
+            # self.get_logger().info(f'{left_images},{right_images}')
+
             for idx, (left, right) in enumerate(zip(left_images, right_images)):
                 self.stereo_processor.set_images(image_left=self.load_image(os.path.join(output_dir,'fringe', "left", left)),
                                                image_right=self.load_image(os.path.join(output_dir,'fringe', "right", right)),
@@ -360,6 +423,7 @@ class ProcessPhase(Node):
             self._publish_image(self._pub_phi_right, abs_phi_r.astype(np.float64), "64FC1", stamp, "Active/right_camera_link")
             self._publish_image(self._pub_mod_left,  self._norm_u8(mod_l), "8UC1", stamp, "Active/left_camera_link")
             self._publish_image(self._pub_mod_right, self._norm_u8(mod_r), "8UC1", stamp, "Active/right_camera_link")
+            # self.stereo_processor.reset_images()
 
             if p["debug_show"]:
                 self._publish_debug_image(self._pub_dbg_left,  abs_phi_l, stamp)
@@ -394,14 +458,7 @@ class ProcessPhase(Node):
             return ((img - mn) / (mx - mn) * 255).astype(np.uint8)
         return np.zeros_like(img, dtype=np.uint8)
 
-    def _publish_image(
-        self,
-        publisher,
-        image: np.ndarray,
-        encoding: str,
-        stamp,
-        frame_id: str = "Active/left_camera_link",
-    ) -> None:
+    def _publish_image(self, publisher, image: np.ndarray,encoding: str, stamp,frame_id: str = "Active/left_camera_link") -> None:
         try:
             msg = self._bridge.cv2_to_imgmsg(image, encoding=encoding)
             msg.header.stamp    = stamp
@@ -410,13 +467,7 @@ class ProcessPhase(Node):
         except Exception as exc:
             self.get_logger().error(f"Publish error ({encoding}): {exc}")
 
-    def _publish_debug_image(
-        self,
-        publisher,
-        image_f32: np.ndarray,
-        stamp,
-        frame_id: str = "Active/left_camera_link",
-    ) -> None:
+    def _publish_debug_image(self, publisher, image_f32: np.ndarray, stamp, frame_id: str = "Active/left_camera_link") -> None:
         vis = self._norm_u8(image_f32)
         try:
             msg = self._bridge.cv2_to_imgmsg(vis, encoding="mono8")

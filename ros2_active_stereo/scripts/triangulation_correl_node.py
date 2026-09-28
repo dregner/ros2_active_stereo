@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import os
 import cv2
+import datetime
 import numpy as np
 import time
 import struct
@@ -11,7 +13,11 @@ from SpatialCorrelation_pytorch import PyTorchStereoCorrel as SpatialCorrelator
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2, PointField
-from std_msgs.msg import Int16
+from geometry_msgs.msg import TransformStamped, PoseStamped, PoseWithCovarianceStamped
+from ros2_active_stereo_msgs.srv import ProcessFolder
+
+from std_srvs.srv import Trigger, Empty
+from std_msgs.msg import Int16, String
 from std_msgs.msg import Header
 import sensor_msgs_py.point_cloud2 as pc2
 import tf2_ros
@@ -29,8 +35,8 @@ class InverseTriangulationNode(Node):
 
         # Parameters declaration
         self.declare_parameter('yaml_path', '~/ros2_ws/src/stereo_active/config/SM3.yaml')
-        self.declare_parameter('tile', 1)
-        self.declare_parameter('climp', 5.0)
+        self.declare_parameter('tile', 2)
+        self.declare_parameter('climp', 8.0)
         self.declare_parameter('window_size', 3)
         self.declare_parameter('stride', 1)
         self.declare_parameter('threshold', 0.7)
@@ -43,6 +49,8 @@ class InverseTriangulationNode(Node):
         self.declare_parameter('n_images', 10)
         self.declare_parameter('camera_frame_id', 'SM3/left_camera_link')
         self.declare_parameter('zval', 300)
+        self.declare_parameter('ekf', False)
+        self.declare_parameter('save_images', False)
 
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         self.num_images = self.get_parameter('n_images').get_parameter_value().integer_value
@@ -52,67 +60,78 @@ class InverseTriangulationNode(Node):
         # Initialize the InverseTriangulation class
         self.zscan = SpatialCorrelator(yaml_file=self.yaml_file)
 
-        self.left_images = []
-        self.right_images = []
-
+        # Services
+        self.process_sm3 = self.create_service(Empty, 'process_sm3', self.process_sm3_callback)
+        self.laser_process = self.create_client(ProcessFolder, 'laser_acquisition')
         # Initialize the subscribers
         sub_profile = rclpy.qos.QoSProfile(reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=5)
 
-        self.passive_pcl_sub = self.create_subscription(PointCloud2, 'disparity/pointcloud', self.z_limits_global, sub_profile)
-        self.handshake_images_sub = self.create_subscription(Int16, 'handshake_images', self.handshake_images_cb, 10)
-        
+        self._state_sub= self.create_subscription(String, "state_acquisition_process", self.state_cb, sub_profile)
+        self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, sub_profile)
+        if(self.get_parameter('ekf').get_parameter_value().bool_value):
+            self.pose_sub = self.create_subscription(PoseStamped, 'pose', self.pose_cb, sub_profile)
+        else:
+            self.pose_sub = self.create_subscription(PoseWithCovarianceStamped, 'pose_cov', self.pose_cb, sub_profile)
+            
         # Initialize the publisher
         self.pointcloud_publisher = self.create_publisher(PointCloud2, 'pointcloud', 10)
 
         self.perform_correl = False
-
+        self.wait_save = False
+        self.process_data = False
         # Construct variables in case disparity point cloud is not available
         self.zmin = -self.get_parameter('zval').get_parameter_value().integer_value
         self.zmax = self.get_parameter('zval').get_parameter_value().integer_value
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.process_timer  = self.create_timer(1, self.image_process)
+    
+    def state_cb(self, msg):
+        if self.process_data:
+            if msg.data == "ZNCC_ACQUIRING":
+                self.wait_save = True
+            if msg.data == "IDLE" and self.wait_save:
+                self.perform_correl = True
 
-    def handshake_images_cb(self, msg):
-        #importa as mensagens da memoria ram
+    def pose_cb(self, msg):
+        if not self.perform_correl:
+            self.pose_msg = msg
 
-        #self.get_logger().info(f"Handshake do c++ concluido, num_images= {msg.data}")
-        self.num_images = abs(msg.data)         # verifica o sinal do numero de img recebido para definir se realiza a correlacao
-        self.perform_correl = msg.data > 0
-        base_path = '/tmp/rrp_stereo'
+    def save_pose(self):
+        p = self.pose_msg.pose.pose.position
+        q = self.pose_msg.pose.pose.orientation
+        t = self.pose_msg.header.stamp.sec + self.pose_msg.header.stamp.nanosec * 1e-9
 
-        self.left_images = []
-        self.right_images = []
+        # 1 row with 8 columns: [timestamp, x, y, z, qx, qy, qz, qw]
+        return np.array([[t, p.x, p.y, p.z, q.x, q.y, q.z, q.w]], dtype=np.float64)
 
-        for n in range(1, self.num_images + 1):
-            left_img_path = f"{base_path}/left/L{n:02d}.png"
-            right_img_path = f"{base_path}/right/R{n:02d}.png"
-
-            left_image = cv2.imread(left_img_path,cv2.IMREAD_GRAYSCALE)
-            right_image = cv2.imread(right_img_path,cv2.IMREAD_GRAYSCALE)
-
-            if left_image is None or right_image is None:
-                self.get_logger().error(f'Erro ao carregar a imagem {n}')
-                return
-
-            self.left_images.append(left_image)
-            self.right_images.append(right_image)
-
-        self.image_process()
-        
+    
     def image_process(self):
         tile = self.get_parameter('tile').get_parameter_value().integer_value
         climp = self.get_parameter('climp').get_parameter_value().double_value
+        n_imgs = self.get_parameter('n_images').get_parameter_value().integer_value
 
         if self.perform_correl:
+            left_imgs = sorted(os.listdir(os.path.join(self.folder,'laser', "left")))
+            right_imgs = sorted(os.listdir(os.path.join(self.folder,'laser', "right")))
+            left_images = []
+            right_images = []
+            data = self.save_pose()
+            np.savetxt(os.path.join(self.folder,'laser', 'pose.txt'),data, fmt="%.6f", delimiter=",")
+            for idx, (left, right) in enumerate(zip(left_imgs, right_imgs)):
+                left_images.append(cv2.imread(os.path.join(self.folder,'laser', "left", left), cv2.IMREAD_GRAYSCALE))
+                right_images.append(cv2.imread(os.path.join(self.folder,'laser', "right", right), cv2.IMREAD_GRAYSCALE))
+
             t0 = time.time()
-            self.zscan.convert_images(left_imgs_cpu=self.left_images, right_imgs_cpu=self.right_images, apply_clahe=True, undist=True, tile=tile, climp=climp)
+            self.zscan.convert_images(left_imgs_cpu=left_images, right_imgs_cpu=right_images, apply_clahe=True, undist=True, tile=tile, climp=climp)
             self.get_logger().info('Images converted: {:.2f} s'.format(time.time()-t0))
-            self.triangulation()
+            # self.triangulation()
             self.get_logger().info('Correlation process finished: {:.2f} s'.format(time.time()-t0))
             self.perform_correl = False
-            self.left_images.clear()
-            self.right_images.clear()
+            self.wait_save = False
+            self.process_data = False
+
             
             # --- Limpando a memoria
             # 1. Cortamos as referências dos tensores dentro da classe PyTorch
@@ -128,9 +147,32 @@ class InverseTriangulationNode(Node):
             
             # 3. Agora sim, esvaziamos a VRAM da Jetson
             torch.cuda.empty_cache()
-            self.get_logger().info('Memoria limpa')
             # -------------------------------
-            
+
+    def _laser_process(self, folder):
+        request = ProcessFolder.Request()
+        request.folder_path = folder
+        future = self.laser_process.call_async(request)
+        future.add_done_callback(self._laser_callback)
+    
+    def _laser_callback(self, future):
+        try:
+            future.result()
+            self.get_logger().info('Request laser process successful')
+        except Exception as e:
+            self.get_logger().error(f'Error ao chamar o serviço de fase: {e}')
+
+    def process_sm3_callback(self, request, response):
+        self.get_logger().info('Start processing laser')
+        self.process_data = True
+        save_imgs = bool(self.get_parameter('save_images').value)
+        if save_imgs:
+            self.folder = f"/home/{os.getenv('USER')}/Pictures/active_stereo/{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
+            self._laser_process(self.folder)
+        else:
+            self.folder = '/home/jetson/active_results'
+            self._laser_process(self.folder)
+        return response
 
     def triangulation(self):
         """
