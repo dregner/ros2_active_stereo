@@ -41,7 +41,7 @@ class TriangulationNode(Node):
         # Parameters
         self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_active_stereo/params/lab_active.yaml')
         self.declare_parameter('mod_thresh', 30) #cupy 0.07. torch (0-255)
-        self.declare_parameter('rad_tresh', 0.05) #threshold for radian difference
+        self.declare_parameter('rad_thresh', 0.05) #threshold for radian difference
         self.declare_parameter('debug_save_points', False)
         self.declare_parameter('save_filename', 'fringe_points')
         self.declare_parameter('camera_frame_id', '/Active/left_camera_link')
@@ -77,6 +77,7 @@ class TriangulationNode(Node):
             self.pose_sub = self.create_subscription(PoseWithCovarianceStamped, 'pose_cov', self.pose_cb, sub_profile)
             
         self.pose_msg = None
+        self.transformed_xyz = None
 
         # Torch class
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
@@ -145,9 +146,13 @@ class TriangulationNode(Node):
         left_images = np.asarray([self.images['sync/left/phase_map'], self.images['sync/left/modulation_map']])
         right_images = np.asarray([self.images['sync/right/phase_map'], self.images['sync/right/modulation_map']])
         self.zscan.convert_images(left_images, right_images, apply_clahe=False, undist=True)
-        data = self.save_pose()
-        np.savetxt(os.path.join(self.folder,'fringe', 'pose.txt'),data, fmt="%.6f", delimiter=",")
-        # self.triangulation()
+        if self.pose_msg is not None:
+            data = self.save_pose()
+            np.savetxt(os.path.join(self.folder,'fringe', 'pose.txt'),data, fmt="%.6f", delimiter=", ")
+        if self.transformed_xyz is not None:
+            np.savetxt(os.path.join(self.folder,'fringe', 'passive_pointcloud_mm.txt'),self.transformed_xyz, fmt="%.6f", delimiter=", ")
+        self.triangulation()
+        self.zscan.clean_memory()
 
     def triangulation(self):
         """
@@ -159,7 +164,7 @@ class TriangulationNode(Node):
         
         # Get filter points parameters
         mod_tresh = self.get_parameter('mod_thresh').get_parameter_value().integer_value
-        rad_tresh = self.get_parameter('rad_tresh').get_parameter_value().double_value
+        rad_thresh = self.get_parameter('rad_thresh').get_parameter_value().double_value
         radius = self.get_parameter('radius').get_parameter_value().integer_value
         min_neighbours = self.get_parameter('neighbours').get_parameter_value().integer_value
         save_points = self.get_parameter('debug_save_points').get_parameter_value().bool_value
@@ -177,7 +182,7 @@ class TriangulationNode(Node):
                         
         xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=10, method='fringe')
         # filter points based on difference value in radians
-        filter_mask = corr_gpu < rad_tresh
+        filter_mask = corr_gpu < rad_thresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
@@ -211,7 +216,7 @@ class TriangulationNode(Node):
         xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=60, method='fringe')
 
         
-        filter_mask = corr_gpu < rad_tresh
+        filter_mask = corr_gpu < rad_thresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
@@ -224,7 +229,7 @@ class TriangulationNode(Node):
 
         if save_points:
             # Salvar os pontos refinados em um arquivo .txt
-            np.savetxt('{}_{}.txt'.format(time.strftime("%Y%m%d"), filename), final_xyz_gpu.cpu().numpy(), fmt='%.6f')
+            np.savetxt(os.path.join(self.folder,'fringe','{}_{}.txt'.format(time.strftime("%Y%m%d"), filename)), final_xyz_gpu.cpu().numpy(), fmt='%.6f')
 
         self.process_triang = False
    
@@ -303,18 +308,18 @@ class TriangulationNode(Node):
         transformed_ph = (T_sm2_sm4 @ points_homogeneous.T).T
 
         # Extract the XYZ coordinates
-        transformed_xyz_cam = transformed_ph[:, :3] * 1000  # Convert from meters to millimeters
+        self.transformed_xyz_cam = transformed_ph[:, :3] * 1000  # Convert from meters to millimeters
 
         # transformar os pontos para peça
-        transformed_xyz = ((R_left.T @ transformed_xyz_cam.T) - (R_left.T @ T_left[:, None])).T
+        self.transformed_xyz = ((R_left.T @ self.transformed_xyz_cam.T) - (R_left.T @ T_left[:, None])).T
 
         xmin, xmax = -100, 500
         ymin, ymax = -100, 400
 
-        xmask = (transformed_xyz[:, 0] >= xmin) & (transformed_xyz[:, 0] <= xmax)
-        ymask = (transformed_xyz[:, 1] >= ymin) & (transformed_xyz[:, 1] <= ymax)
+        xmask = (self.transformed_xyz[:, 0] >= xmin) & (self.transformed_xyz[:, 0] <= xmax)
+        ymask = (self.transformed_xyz[:, 1] >= ymin) & (self.transformed_xyz[:, 1] <= ymax)
         mask = xmask & ymask
-        filtered_points = transformed_xyz[mask]
+        filtered_points = self.transformed_xyz[mask]
 
         # Obtém os limites globais dos pontos
         self.zmin = np.min(filtered_points[:, 2]) - 100 # Consider only Z values

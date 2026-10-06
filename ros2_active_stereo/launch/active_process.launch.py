@@ -5,7 +5,8 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 import os
 def generate_launch_description():
-    config_file = os.path.join( get_package_share_directory('ros2_active_stereo'), 'config', 'stereo_active_params.yaml' )
+    # config_file = os.path.join( get_package_share_directory('ros2_active_stereo'), 'config', 'stereo_active_params.yaml' )
+    config_file = f'/home/{os.environ["USER"]}/ros2_ws/src/ros2_active_stereo/ros2_active_stereo/config/stereo_active_params.yaml'
     return LaunchDescription([
 
         DeclareLaunchArgument('passive_pointcloud', default_value='/Passive/disparity/pointcloud', description='Passive pointcloud data'),

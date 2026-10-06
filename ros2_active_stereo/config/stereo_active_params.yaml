@@ -20,7 +20,7 @@
 
     # Stereo correlation parameters
     zncc_n_imgs: 5
-    zncc_steps: 20
+    zncc_steps: 10
     zncc_warminig: 0
 
     # Debug
@@ -29,20 +29,14 @@
 /**/triangulation_fringe_node:
   ros__parameters:
     yaml_path: "/home/jetson/ros2_ws/src/ros2_active_stereo/ros2_active_stereo/config/lab_active.yaml"
-    tile: 1
-    climp: 5.0
-    window_size: 3
-    stride: 1
-    threshold: 0.7
-    std_thresh: 20
+    rad_thresh: 0.1
+    mod_thresh: 20
     radius: 10
     neighbours: 10
-    crop_image_factor: 0.9
-    save_filename: "correlation_points"
-    debug_save_points: false
-    n_images: 10
+    save_filename: "fringe_points"
+    debug_save_points: true
     camera_frame_id: "Active/left_camera_link"
-    zval: 300
+    zval: 400
 
 /**/triangulation_correl_node:
   ros__parameters:
@@ -51,13 +45,13 @@
     climp: 8.0
     window_size: 3
     stride: 1
-    threshold: 0.7
-    std_thresh: 20
+    threshold: 0.6
+    std_thresh: 10
     radius: 10
     neighbours: 10
     crop_image_factor: 0.9
     save_filename: "correlation_points"
-    debug_save_points: false
-    n_images: 10
+    debug_save_points: true
+    n_images: 5
     camera_frame_id: "Active/left_camera_link"
-    zval: 300
+    zval: 400

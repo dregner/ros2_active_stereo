@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import gc
+
 import yaml
 import matplotlib.pyplot as plt
 import cv2
@@ -440,3 +442,13 @@ class PyTorchStereoCorrel(nn.Module):
         ax.set_xlabel('X [mm]'); ax.set_ylabel('Y [mm]'); ax.set_zlabel('Z [mm]')
         ax.set_aspect('equal', adjustable='box')
         plt.show()
+
+    def clean_memory(self):
+            self.left_images = None
+            self.right_images = None
+            self.grid = None
+            self.x_vals = None
+            self.y_vals = None
+            self.z_vals = None
+            gc.collect()
+            torch.cuda.empty_cache()

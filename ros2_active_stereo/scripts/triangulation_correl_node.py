@@ -6,7 +6,6 @@ import numpy as np
 import time
 import struct
 import torch
-import gc
 
 from SpatialCorrelation_pytorch import PyTorchStereoCorrel as SpatialCorrelator
 
@@ -79,6 +78,8 @@ class InverseTriangulationNode(Node):
         self.perform_correl = False
         self.wait_save = False
         self.process_data = False
+        self.pose_msg = None
+        self.transformed_xyz = None
         # Construct variables in case disparity point cloud is not available
         self.zmin = -self.get_parameter('zval').get_parameter_value().integer_value
         self.zmax = self.get_parameter('zval').get_parameter_value().integer_value
@@ -88,6 +89,7 @@ class InverseTriangulationNode(Node):
         self.process_timer  = self.create_timer(1, self.image_process)
     
     def state_cb(self, msg):
+        # return
         if self.process_data:
             if msg.data == "ZNCC_ACQUIRING":
                 self.wait_save = True
@@ -117,37 +119,28 @@ class InverseTriangulationNode(Node):
             right_imgs = sorted(os.listdir(os.path.join(self.folder,'laser', "right")))
             left_images = []
             right_images = []
-            data = self.save_pose()
-            np.savetxt(os.path.join(self.folder,'laser', 'pose.txt'),data, fmt="%.6f", delimiter=",")
+
+            if self.pose_msg is not None:
+                data = self.save_pose()
+                np.savetxt(os.path.join(self.folder,'laser', 'pose.txt'),data, fmt="%.6f", delimiter=", ")
+            if self.transformed_xyz is not None:
+                np.savetxt(os.path.join(self.folder,'laser', 'passive_pointcloud_mm.txt'),self.transformed_xyz, fmt="%.6f", delimiter=", ")
+        
             for idx, (left, right) in enumerate(zip(left_imgs, right_imgs)):
                 left_images.append(cv2.imread(os.path.join(self.folder,'laser', "left", left), cv2.IMREAD_GRAYSCALE))
                 right_images.append(cv2.imread(os.path.join(self.folder,'laser', "right", right), cv2.IMREAD_GRAYSCALE))
 
             t0 = time.time()
             self.zscan.convert_images(left_imgs_cpu=left_images, right_imgs_cpu=right_images, apply_clahe=True, undist=True, tile=tile, climp=climp)
-            self.get_logger().info('Images converted: {:.2f} s'.format(time.time()-t0))
             # self.triangulation()
             self.get_logger().info('Correlation process finished: {:.2f} s'.format(time.time()-t0))
             self.perform_correl = False
             self.wait_save = False
             self.process_data = False
-
-            
             # --- Limpando a memoria
-            # 1. Cortamos as referências dos tensores dentro da classe PyTorch
-            self.zscan.left_images = None
-            self.zscan.right_images = None
-            self.zscan.grid = None
-            self.zscan.x_vals = None
-            self.zscan.y_vals = None
-            self.zscan.z_vals = None
-
-            # 2. Forçamos o Python a reconhecer que os objetos estão órfãos
-            gc.collect()
+            self.zscan.clean_memory()
             
-            # 3. Agora sim, esvaziamos a VRAM da Jetson
-            torch.cuda.empty_cache()
-            # -------------------------------
+
 
     def _laser_process(self, folder):
         request = ProcessFolder.Request()
@@ -159,6 +152,7 @@ class InverseTriangulationNode(Node):
         try:
             future.result()
             self.get_logger().info('Request laser process successful')
+            # self.perform_correl = True
         except Exception as e:
             self.get_logger().error(f'Error ao chamar o serviço de fase: {e}')
 
@@ -208,7 +202,7 @@ class InverseTriangulationNode(Node):
         xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=win_size, Ky=win_size, stride=stride, Nz_block_voxels=10, method='correl')
 
         # filter points based on difference value in radians
-        filter_mask = corr_gpu > 0.6
+        filter_mask = corr_gpu > correl_thresh
         xyz_filtered_gpu = xyz_gpu[filter_mask]
         corr_filtered_gpu = corr_gpu[filter_mask]
         xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.mask_uv_points(xyz_filtered_gpu, corr_filtered_gpu, crop_factor=crop_factor)
@@ -288,18 +282,18 @@ class InverseTriangulationNode(Node):
         transformed_ph = (T_passive2active @ points_homogeneous.T).T
 
         # Extract the XYZ coordinates
-        transformed_xyz_cam = transformed_ph[:, :3] * 1000  # Convert from meters to millimeters
+        self.transformed_xyz_cam = transformed_ph[:, :3] * 1000  # Convert from meters to millimeters
 
         # transformar os pontos para peça
-        transformed_xyz = ((R_left.T @ transformed_xyz_cam.T) - T_left[:, None]).T
+        self.transformed_xyz = ((R_left.T @ self.transformed_xyz_cam.T) - T_left[:, None]).T
 
         xmin, xmax = -100, 500
         ymin, ymax = -100, 400
 
-        xmask = (transformed_xyz[:, 0] >= xmin) & (transformed_xyz[:, 0] <= xmax)
-        ymask = (transformed_xyz[:, 1] >= ymin) & (transformed_xyz[:, 1] <= ymax)
+        xmask = (self.transformed_xyz[:, 0] >= xmin) & (self.transformed_xyz[:, 0] <= xmax)
+        ymask = (self.transformed_xyz[:, 1] >= ymin) & (self.transformed_xyz[:, 1] <= ymax)
         mask = xmask & ymask
-        filtered_points = transformed_xyz[mask]
+        filtered_points = self.transformed_xyz[mask]
 
         # Obtém os limites globais dos pontos
         self.zmin = np.min(filtered_points[:, 2]) - 100  # Consider only Z values
