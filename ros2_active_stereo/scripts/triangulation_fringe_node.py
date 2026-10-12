@@ -20,8 +20,9 @@ import tf_transformations
 
 from SpatialCorrelation_pytorch import PyTorchStereoCorrel
 import torch
+from pipeline_utils import ScanWorkerMixin, stamp_key
 
-class TriangulationNode(Node):
+class TriangulationNode(ScanWorkerMixin, Node):
 
     def __init__(self):
         super().__init__('triangulation_node')
@@ -64,6 +65,7 @@ class TriangulationNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.process_triang = False
+        self._batches = {}
         # Services
         self.process_sm4 = self.create_service(Empty, 'process_sm4', self.process_sm4_callback)
         self.phase_process = self.create_client(ProcessFolder, 'fringe_acquisition')
@@ -82,6 +84,7 @@ class TriangulationNode(Node):
         # Torch class
         self.yaml_file = self.get_parameter('yaml_path').get_parameter_value().string_value
         self.zscan = PyTorchStereoCorrel(yaml_file=self.yaml_file)
+        self._init_scan_worker("fringe", "process_triang")
         self.get_logger().info("Node 'triangulation_node' criado")
 
     def pose_cb(self, msg):
@@ -89,57 +92,54 @@ class TriangulationNode(Node):
             self.pose_msg = msg
 
     def save_pose(self):
-        p = self.pose_msg.pose.pose.position
-        q = self.pose_msg.pose.pose.orientation
+        pose = self.pose_msg.pose if self.get_parameter("ekf").value else self.pose_msg.pose.pose
+        p = pose.position
+        q = pose.orientation
         t = self.pose_msg.header.stamp.sec + self.pose_msg.header.stamp.nanosec * 1e-9
 
         # 1 row with 8 columns: [timestamp, x, y, z, qx, qy, qz, qw]
         return np.array([[t, p.x, p.y, p.z, q.x, q.y, q.z, q.w]], dtype=np.float64)
 
     
-    def _phase_process(self, folder):
-        request = ProcessFolder.Request()
-        request.folder_path = folder
-        future = self.phase_process.call_async(request)
-        future.add_done_callback(self._phase_callback)
-    
-    def _phase_callback(self, future):
-        try:
-            future.result()
-            self.get_logger().info('Request phase process successful')
-        except Exception as e:
-            self.get_logger().error(f'Error ao chamar o serviço de fase: {e}')
-
     def process_sm4_callback(self, request, response):
-        self.get_logger().info('Start processing phase')
-        self.process_triang = True
-        save_imgs = bool(self.get_parameter('save_images').value)
-        if save_imgs:
-            self.folder = f"/home/{os.getenv('USER')}/Pictures/active_stereo/{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
-            self._phase_process(self.folder)
-        else:
-            self.folder = '/home/jetson/active_results'
-            self._phase_process(self.folder)
+        self._begin_scan(self.phase_process, ProcessFolder)
         return response
-    
+
+    def _reset_scan_buffers(self):
+        self.images = {key: None for key in self.images}
+        self._batches.clear()
+
     def image_callback(self, msg, image_type):
+        with self._scan_lock:
+            if not self.process_triang or self._working:
+                return
+            key = stamp_key(msg.header.stamp)
+            if self._expected_stamp is not None and key != self._expected_stamp:
+                return
+            try:
+                batch = self._batches.setdefault(key, {})
+                batch[image_type] = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+                # Bound unmatched data while waiting for the folder-tagged result.
+                while len(self._batches) > 2:
+                    del self._batches[min(self._batches)]
+                self._dataset_ready()
+            except Exception as exc:
+                self.get_logger().error(f'Invalid phase map: {exc}')
+                self._finish_scan()
 
-        # Atualiza o dicionário com a imagem/máscara correspondente
-        self.get_logger().debug(f"Received image for {image_type}")
-        self.images[image_type] = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-        if self.zscan is not None:
-            self.get_logger().debug("Zscan initialized, processing images.")
-            self.check_and_process_images()
-        else:
-            self.get_logger().warn("zscan is not initialized yet. Waiting for images.")
-
-    def check_and_process_images(self):
-
-        # Verifica se todas as imagens foram recebidas
-        if all(image is not None for image in self.images.values()):
-            # self.get_logger().info("All images received, starting processing.")
-            if self.process_triang:
-                self.process_images()
+    def _dataset_ready(self):
+        if self._expected_stamp is None:
+            return
+        batch = self._batches.get(self._expected_stamp, {})
+        if all(key in batch for key in self.images):
+            shapes = {img.shape for img in batch.values()}
+            if len(shapes) != 1 or len(next(iter(shapes))) != 2:
+                self.get_logger().error('Phase and modulation maps must share a 2D shape')
+                self._finish_scan()
+                return
+            self.images = dict(batch)
+            self._batches.clear()
+            self._submit_scan(self.process_images)
 
     def process_images(self):
         # TORCH
@@ -152,7 +152,6 @@ class TriangulationNode(Node):
         if self.transformed_xyz is not None:
             np.savetxt(os.path.join(self.folder,'fringe', 'passive_pointcloud_mm.txt'),self.transformed_xyz, fmt="%.6f", delimiter=", ")
         self.triangulation()
-        self.zscan.clean_memory()
 
     def triangulation(self):
         """
@@ -206,8 +205,7 @@ class TriangulationNode(Node):
         # self.get_logger().info(f'3D bounds for refined triangulation: X: {xlim}, Y: {ylim}, Z: {zlim}')
         if zlim[0] == zlim[1]:
             self.get_logger().info("Z are same")
-            zlim[0] = zlim[0] - 10
-            zlim[1] = zlim[1] + 10
+            zlim = (zlim[0] - 10, zlim[1] + 10)
 
         # Construct second 3d points
         self.zscan.points3d(x_lim=xlim, y_lim=ylim, z_lim=zlim, 
@@ -231,7 +229,6 @@ class TriangulationNode(Node):
             # Salvar os pontos refinados em um arquivo .txt
             np.savetxt(os.path.join(self.folder,'fringe','{}_{}.txt'.format(time.strftime("%Y%m%d"), filename)), final_xyz_gpu.cpu().numpy(), fmt='%.6f')
 
-        self.process_triang = False
    
     def publish_pointcloud(self, points):
         T_left = self.zscan.camera_params['left']['t'].cpu().numpy().T[0]  # Obter translação da câmera esquerda
@@ -249,7 +246,7 @@ class TriangulationNode(Node):
         self.frame_id = self.get_parameter('camera_frame_id').value
         # Converte para mensagem PointCloud2
         header = Header()
-        header.stamp = self.get_clock().now().to_msg()
+        header.stamp = self._scan_stamp or self.get_clock().now().to_msg()
         header.frame_id = self.frame_id
         fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
@@ -275,6 +272,8 @@ class TriangulationNode(Node):
         )
 
     def z_limits_global(self, points):
+        if self.process_triang:
+            return
 
         sm4_frame_id = self.get_parameter('camera_frame_id').value
         T_left = self.zscan.camera_params['left']['t'].cpu().numpy().T[0]  # Obter translação da câmera esquerda
@@ -321,6 +320,8 @@ class TriangulationNode(Node):
         mask = xmask & ymask
         filtered_points = self.transformed_xyz[mask]
 
+        if filtered_points.size == 0:
+            return
         # Obtém os limites globais dos pontos
         self.zmin = np.min(filtered_points[:, 2]) - 100 # Consider only Z values
         self.zmax = np.max(filtered_points[:, 2]) + 100# Consider only Z values

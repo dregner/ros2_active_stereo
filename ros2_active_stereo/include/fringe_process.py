@@ -12,6 +12,7 @@ from typing import Optional, Union, Tuple
 # try:
 from fringe_pattern import FringePattern
 from gray_code import GrayCode
+from pipeline_utils import graycode_bits
 # except (ImportError, ValueError):
 #     from fringe_pattern import FringePattern
 #     from gray_code import GrayCode
@@ -29,7 +30,7 @@ class FringeProcess(GrayCode, FringePattern):
         else:
             self.device = torch.device(device)
 
-        self.n_min_bits = self.min_bits_gc(math.floor(img_resolution[0] / px_f)) + 2
+        self.n_min_bits = graycode_bits(img_resolution[0], px_f) + 2
         total_channels = int(steps + self.n_min_bits)
 
         self.images_left = torch.zeros((camera_resolution[1], camera_resolution[0], total_channels),
@@ -52,7 +53,7 @@ class FringeProcess(GrayCode, FringePattern):
         self.abs_phi_image_right = None
 
         FringePattern.__init__(self, resolution=img_resolution, px_f=px_f, steps=steps)
-        GrayCode.__init__(self, resolution=img_resolution, n_bits=self.min_bits_gc(math.floor(img_resolution[0] / px_f)),
+        GrayCode.__init__(self, resolution=img_resolution, n_bits=graycode_bits(img_resolution[0], px_f),
                           px_f=px_f)
 
     def to(self, device: Union[torch.device, str]):

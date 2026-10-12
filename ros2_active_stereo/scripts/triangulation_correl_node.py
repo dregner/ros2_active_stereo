@@ -6,6 +6,7 @@ import numpy as np
 import time
 import struct
 import torch
+from pipeline_utils import ScanWorkerMixin, validate_pairs
 
 from SpatialCorrelation_pytorch import PyTorchStereoCorrel as SpatialCorrelator
 
@@ -27,7 +28,7 @@ import tf_transformations
 # handshake para importar as imagens
 
 
-class InverseTriangulationNode(Node):
+class InverseTriangulationNode(ScanWorkerMixin, Node):
     def __init__(self):
         super().__init__('inverse_correlation_node')
         self.get_logger().info('Inverse Correlation Node has been started.')
@@ -65,7 +66,6 @@ class InverseTriangulationNode(Node):
         # Initialize the subscribers
         sub_profile = rclpy.qos.QoSProfile(reliability=rclpy.qos.ReliabilityPolicy.BEST_EFFORT,history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=5)
 
-        self._state_sub= self.create_subscription(String, "state_acquisition_process", self.state_cb, sub_profile)
         self.passive_pointcloud_subscriber = self.create_subscription(PointCloud2, 'passive/pointcloud', self.z_limits_global, sub_profile)
         if(self.get_parameter('ekf').get_parameter_value().bool_value):
             self.pose_sub = self.create_subscription(PoseStamped, 'pose', self.pose_cb, sub_profile)
@@ -86,23 +86,24 @@ class InverseTriangulationNode(Node):
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        self.process_timer  = self.create_timer(1, self.image_process)
+        self._init_scan_worker("correlation", "process_data")
     
-    def state_cb(self, msg):
-        # return
-        if self.process_data:
-            if msg.data == "ZNCC_ACQUIRING":
-                self.wait_save = True
-            if msg.data == "IDLE" and self.wait_save:
-                self.perform_correl = True
+    def _reset_scan_buffers(self):
+        self.perform_correl = False
+        self.wait_save = False
+
+    def _dataset_ready(self):
+        self.perform_correl = True
+        self._submit_scan(self.image_process)
 
     def pose_cb(self, msg):
-        if not self.perform_correl:
+        if not self.process_data:
             self.pose_msg = msg
 
     def save_pose(self):
-        p = self.pose_msg.pose.pose.position
-        q = self.pose_msg.pose.pose.orientation
+        pose = self.pose_msg.pose if self.get_parameter("ekf").value else self.pose_msg.pose.pose
+        p = pose.position
+        q = pose.orientation
         t = self.pose_msg.header.stamp.sec + self.pose_msg.header.stamp.nanosec * 1e-9
 
         # 1 row with 8 columns: [timestamp, x, y, z, qx, qy, qz, qw]
@@ -115,8 +116,7 @@ class InverseTriangulationNode(Node):
         n_imgs = self.get_parameter('n_images').get_parameter_value().integer_value
 
         if self.perform_correl:
-            left_imgs = sorted(os.listdir(os.path.join(self.folder,'laser', "left")))
-            right_imgs = sorted(os.listdir(os.path.join(self.folder,'laser', "right")))
+            pairs = validate_pairs(self.folder, "laser", n_imgs)
             left_images = []
             right_images = []
 
@@ -126,46 +126,23 @@ class InverseTriangulationNode(Node):
             if self.transformed_xyz is not None:
                 np.savetxt(os.path.join(self.folder,'laser', 'passive_pointcloud_mm.txt'),self.transformed_xyz, fmt="%.6f", delimiter=", ")
         
-            for idx, (left, right) in enumerate(zip(left_imgs, right_imgs)):
-                left_images.append(cv2.imread(os.path.join(self.folder,'laser', "left", left), cv2.IMREAD_GRAYSCALE))
-                right_images.append(cv2.imread(os.path.join(self.folder,'laser', "right", right), cv2.IMREAD_GRAYSCALE))
+            for left, right in pairs:
+                img_l, img_r = cv2.imread(left, cv2.IMREAD_GRAYSCALE), cv2.imread(right, cv2.IMREAD_GRAYSCALE)
+                if img_l is None or img_r is None or img_l.shape != img_r.shape:
+                    raise ValueError("Invalid stereo pair")
+                left_images.append(img_l)
+                right_images.append(img_r)
 
             t0 = time.time()
             self.zscan.convert_images(left_imgs_cpu=left_images, right_imgs_cpu=right_images, apply_clahe=True, undist=True, tile=tile, climp=climp)
             # self.triangulation()
             self.get_logger().info('Correlation process finished: {:.2f} s'.format(time.time()-t0))
-            self.perform_correl = False
-            self.wait_save = False
-            self.process_data = False
-            # --- Limpando a memoria
-            self.zscan.clean_memory()
+            # Worker finally releases the buffers, including failed/empty scans.
             
 
 
-    def _laser_process(self, folder):
-        request = ProcessFolder.Request()
-        request.folder_path = folder
-        future = self.laser_process.call_async(request)
-        future.add_done_callback(self._laser_callback)
-    
-    def _laser_callback(self, future):
-        try:
-            future.result()
-            self.get_logger().info('Request laser process successful')
-            # self.perform_correl = True
-        except Exception as e:
-            self.get_logger().error(f'Error ao chamar o serviço de fase: {e}')
-
     def process_sm3_callback(self, request, response):
-        self.get_logger().info('Start processing laser')
-        self.process_data = True
-        save_imgs = bool(self.get_parameter('save_images').value)
-        if save_imgs:
-            self.folder = f"/home/{os.getenv('USER')}/Pictures/active_stereo/{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
-            self._laser_process(self.folder)
-        else:
-            self.folder = '/home/jetson/active_results'
-            self._laser_process(self.folder)
+        self._begin_scan(self.laser_process, ProcessFolder)
         return response
 
     def triangulation(self):
@@ -223,8 +200,7 @@ class InverseTriangulationNode(Node):
 
         if zlim[0] == zlim[1]:
             self.get_logger().info("Z are same")
-            zlim[0] = zlim[0] - 5
-            zlim[1] = zlim[1] + 5
+            zlim = (zlim[0] - 5, zlim[1] + 5)
 
         # Construct second 3d points
         self.zscan.points3d(x_lim=xlim, y_lim=ylim, z_lim=zlim, 
@@ -250,6 +226,8 @@ class InverseTriangulationNode(Node):
         del xyz_gpu, corr_gpu, xyz_filtered_gpu, corr_filtered_gpu, final_xyz_gpu # limpando memoria
             
     def z_limits_global(self, points):
+        if self.process_data:
+            return
         
         sm3_frame_id = self.get_parameter('camera_frame_id').value
         T_left = self.zscan.camera_params['left']['t'].cpu().numpy().T[0]  # Obter translação da câmera esquerda
@@ -295,6 +273,8 @@ class InverseTriangulationNode(Node):
         mask = xmask & ymask
         filtered_points = self.transformed_xyz[mask]
 
+        if filtered_points.size == 0:
+            return
         # Obtém os limites globais dos pontos
         self.zmin = np.min(filtered_points[:, 2]) - 100  # Consider only Z values
         self.zmax = np.max(filtered_points[:, 2]) + 100  # Consider only Z values
@@ -340,7 +320,7 @@ class InverseTriangulationNode(Node):
         self.frame_id = self.get_parameter('camera_frame_id').value
         # Converte para mensagem PointCloud2
         header = Header()
-        header.stamp = self.get_clock().now().to_msg()
+        header.stamp = self._scan_stamp or self.get_clock().now().to_msg()
         header.frame_id = self.frame_id
         fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),

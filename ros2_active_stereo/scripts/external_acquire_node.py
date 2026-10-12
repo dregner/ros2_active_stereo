@@ -4,6 +4,10 @@ import os
 import subprocess
 import threading
 import time
+import json
+import gc
+import torch
+from pipeline_utils import completion_token, validate_pairs
 
 import cv2
 import numpy as np
@@ -31,9 +35,12 @@ class ProcessPhase(Node):
         self._bridge = CvBridge()
         self._pipeline_lock = threading.Lock()
         self.stereo_processor = None  # type: ignore
+        self._expected_done = None
+        self._backend_error = None
 
         # State ────────────────────────────────────────────────────────────────
         self._state_pub = self.create_publisher(String, "state_acquisition_process", 10)
+        self._result_pub = self.create_publisher(String, "acquisition_result", 10)
         self._current_state = "UNCONFIGURED"
         self._publish_state(self._current_state)
         self.create_timer(0.5, self._publish_state_periodically)
@@ -117,15 +124,48 @@ class ProcessPhase(Node):
             bufsize=1
         )
 
+        proc = self._proc
         def log_stdout():
-            if self._proc and self._proc.stdout:
-                for line in self._proc.stdout:
+            try:
+                for line in proc.stdout:
                     clean_line = line.rstrip()
                     self.get_logger().info(f"[stereo_fringe] {clean_line}")
-                    if "[Pipeline] FRINGE_DONE" in clean_line or "[Pipeline] CORRELATION_DONE" in clean_line or "[Pipeline] MOTOR_DONE" in clean_line or "[Pipeline] LASER_DONE":
+                    if (proc is self._proc and self._expected_done is not None and
+                            completion_token(clean_line) == self._expected_done):
                         self._acquire_done_event.set()
-        
+            finally:
+                if proc is self._proc and self._expected_done is not None:
+                    self._backend_error = "C++ backend exited before completion"
+                    self._acquire_done_event.set()
         threading.Thread(target=log_stdout, daemon=True).start()
+
+    def _run_command(self, command, done, timeout):
+        if self._proc is None or self._proc.poll() is not None:
+            self._start_cpp_process()
+        self._backend_error = None
+        self._acquire_done_event.clear()
+        self._expected_done = done
+        try:
+            self._proc.stdin.write(command + "\n")
+            self._proc.stdin.flush()
+            if not self._acquire_done_event.wait(timeout=timeout):
+                raise TimeoutError(f"C++ backend timed out after {timeout} s")
+            if self._backend_error:
+                raise RuntimeError(self._backend_error)
+        except Exception:
+            # A late completion must never release a subsequent command.
+            self._stop_cpp_process()
+            raise
+        finally:
+            self._expected_done = None
+
+    def _publish_result(self, kind, folder, success, stamp=None, message=""):
+        msg = String()
+        msg.data = json.dumps(dict(kind=kind, folder=folder, success=success,
+                                  stamp=None if stamp is None else [stamp.sec, stamp.nanosec],
+                                  message=message))
+        self._result_pub.publish(msg)
+        self._publish_state(f"{kind.upper()}_DONE" if success else f"{kind.upper()}_FAILED")
 
     def _stop_cpp_process(self):
         if self._proc:
@@ -135,6 +175,7 @@ class ProcessPhase(Node):
                 self._proc.wait(timeout=3.0)
             except Exception:
                 self._proc.kill()
+                self._proc.wait()
             self._proc = None
 
     def _publish_state(self, state: str) -> None:
@@ -207,6 +248,10 @@ class ProcessPhase(Node):
         self.get_logger().info(f"YAML updated: {config_path!r}  (output_dir={output_dir!r})")
 
     def _reconfigure_callback(self, _request, response: Trigger.Response):
+        if not self._pipeline_lock.acquire(blocking=False):
+            response.success = False
+            response.message = "Cannot reconfigure during an active command."
+            return response
         try:
             p = self._read_params()
             cfg_path = p["config_path"]
@@ -229,6 +274,8 @@ class ProcessPhase(Node):
             self.get_logger().error(f"Reconfigure error: {exc}")
             response.success = False
             response.message = str(exc)
+        finally:
+            self._pipeline_lock.release()
         return response
 
     def _fringe_acquisition_callback(self, request: ProcessFolder.Request, response: ProcessFolder.Response):
@@ -238,6 +285,12 @@ class ProcessPhase(Node):
         if not self._pipeline_lock.acquire(blocking=False):
             response.success = False
             response.message = "Acquisition already running."
+            return response
+
+        if os.path.exists(os.path.join(folder, "fringe")):
+            self._pipeline_lock.release()
+            response.success = False
+            response.message = "Dataset already exists; use a fresh scan directory."
             return response
 
         t = threading.Thread(target=self._fringe_worker, args=(folder,), daemon=True)
@@ -254,6 +307,12 @@ class ProcessPhase(Node):
         if not self._pipeline_lock.acquire(blocking=False):
             response.success = False
             response.message = "Acquisition already running."
+            return response
+
+        if os.path.exists(os.path.join(folder, "laser")):
+            self._pipeline_lock.release()
+            response.success = False
+            response.message = "Dataset already exists; use a fresh scan directory."
             return response
 
         t = threading.Thread(target=self._laser_worker, args=(folder,), daemon=True)
@@ -297,14 +356,7 @@ class ProcessPhase(Node):
             if self._proc is None or self._proc.poll() is not None:
                 self._start_cpp_process()
 
-            self._acquire_done_event.clear()
-            if self._proc and self._proc.stdin:
-                self._proc.stdin.write(f"MOTOR {angle}\n")
-                self._proc.stdin.flush()
-            
-                        # Wait for acquisition to finish
-            if not self._acquire_done_event.wait(timeout=p["binary_timeout_s"]):
-                raise RuntimeError(f"C++ binary timed out after {p['binary_timeout_s']} s.")
+            self._run_command(f"MOTOR {angle}", "MOTOR_DONE", p["binary_timeout_s"])
             self._publish_state("TURN LASER MOTOR")
         except Exception as exc:
             self.get_logger().error(f"Pipeline error: {exc}")
@@ -321,14 +373,7 @@ class ProcessPhase(Node):
             self._publish_state("TURN LASER")
             if self._proc is None or self._proc.poll() is not None:
                 self._start_cpp_process()
-            self._acquire_done_event.clear()
-            if self._proc and self._proc.stdin:
-                self._proc.stdin.write(f"LASER {int(state)}\n")
-                self._proc.stdin.flush()
-            
-                        # Wait for acquisition to finish
-            if not self._acquire_done_event.wait(timeout=p["binary_timeout_s"]):
-                raise RuntimeError(f"C++ binary timed out after {p['binary_timeout_s']} s.")
+            self._run_command(f"LASER {int(state)}", "LASER_DONE", p["binary_timeout_s"])
         
             self.get_logger().info("C++ movement complete succesfully")
         except Exception as exc:
@@ -342,10 +387,12 @@ class ProcessPhase(Node):
 
     def _laser_worker(self, output_dir: str):
         try:
+            stamp = self.get_clock().now().to_msg()
             p = self._read_params()
         
             self._publish_state("CONFIGURING")
             os.makedirs(output_dir, exist_ok=True)
+            self._write_yaml(p, output_dir)
             
             if self._proc is None or self._proc.poll() is not None:
                 self._start_cpp_process()
@@ -356,24 +403,16 @@ class ProcessPhase(Node):
             steps = p["zncc_steps"]
             warmup_triggers = p["zncc_warmup"]
             
-            self._acquire_done_event.clear()
-            if self._proc and self._proc.stdin:
-                self._proc.stdin.write(f"CORRELATION {output_dir}\n")
-                self._proc.stdin.flush()
-            
-                        # Wait for acquisition to finish
-            if not self._acquire_done_event.wait(timeout=p["binary_timeout_s"]):
-                raise RuntimeError(f"C++ binary timed out after {p['binary_timeout_s']} s.")
+            self._run_command(f"CORRELATION {output_dir}", "CORRELATION_DONE", p["binary_timeout_s"])
             
             self.get_logger().info("C++ acquisition completed successfully.")
 
             self._publish_state("PROCESSING")
-            left_images = sorted(os.listdir(os.path.join(output_dir,'laser', "left")))
-            right_images = sorted(os.listdir(os.path.join(output_dir,'laser', "right")))
-            # self.get_logger().info(f'{left_images},{right_images}')
+            validate_pairs(output_dir, 'laser', p["zncc_n_img"])
+            self._publish_result("correlation", output_dir, True, stamp)
         except Exception as exc:
             self.get_logger().error(f"Pipeline error: {exc}")
-            self._publish_state("ERROR")
+            self._publish_result("correlation", output_dir, False, message=str(exc))
             if self._proc and self._proc.poll() is not None:
                  self._proc = None # Reset process if it crashed
         finally:
@@ -382,6 +421,7 @@ class ProcessPhase(Node):
 
     def _fringe_worker(self, output_dir: str) -> None:
         try:
+            stamp = self.get_clock().now().to_msg()
             p = self._read_params()
             self.stereo_processor = FringeProcess(img_resolution=(p["proj_width"], p["proj_height"]), camera_resolution=(p["cam_width"], p["cam_height"]), px_f=p["pixels_per_fringe"], steps=p["n_steps"])
             
@@ -394,30 +434,21 @@ class ProcessPhase(Node):
 
             self._publish_state("FRINGE_ACQUIRING")
             
-            self._acquire_done_event.clear()
-            if self._proc and self._proc.stdin:
-                self._proc.stdin.write(f"FRINGE {output_dir}\n")
-                self._proc.stdin.flush()
-            
-            # Wait for acquisition to finish
-            if not self._acquire_done_event.wait(timeout=p["binary_timeout_s"]):
-                raise RuntimeError(f"C++ binary timed out after {p['binary_timeout_s']} s.")
+            self._run_command(f"FRINGE {output_dir}", "FRINGE_DONE", p["binary_timeout_s"])
             
             self.get_logger().info("C++ acquisition completed successfully.")
 
             self._publish_state("PROCESSING")
-            left_images = sorted(os.listdir(os.path.join(output_dir,'fringe', "left")))
-            right_images = sorted(os.listdir(os.path.join(output_dir,'fringe', "right")))
-            # self.get_logger().info(f'{left_images},{right_images}')
-
-            for idx, (left, right) in enumerate(zip(left_images, right_images)):
-                self.stereo_processor.set_images(image_left=self.load_image(os.path.join(output_dir,'fringe', "left", left)),
-                                               image_right=self.load_image(os.path.join(output_dir,'fringe', "right", right)),
-                                               counter=idx)
+            count = self.stereo_processor.images_left.shape[2]
+            pairs = validate_pairs(output_dir, 'fringe', count)
+            for idx, (left, right) in enumerate(pairs):
+                img_l, img_r = self.load_image(left), self.load_image(right)
+                expected = (p["cam_height"], p["cam_width"])
+                if img_l.shape != expected or img_r.shape != expected:
+                    raise ValueError(f"Camera images must have shape {expected}")
+                self.stereo_processor.set_images(img_l, img_r, idx)
 
             abs_phi_l, abs_phi_r, mod_l, mod_r = self.stereo_processor.calculate_abs_phi_images()
-
-            stamp = self.get_clock().now().to_msg()
 
             self._publish_image(self._pub_phi_left,  abs_phi_l.astype(np.float64), "64FC1", stamp, "Active/left_camera_link")
             self._publish_image(self._pub_phi_right, abs_phi_r.astype(np.float64), "64FC1", stamp, "Active/right_camera_link")
@@ -429,14 +460,18 @@ class ProcessPhase(Node):
                 self._publish_debug_image(self._pub_dbg_left,  abs_phi_l, stamp)
                 self._publish_debug_image(self._pub_dbg_right, abs_phi_r, stamp)
 
-            self.get_logger().info("Results published. Returning to IDLE.")
+            self._publish_result("fringe", output_dir, True, stamp)
 
         except Exception as exc:
             self.get_logger().error(f"Pipeline error: {exc}")
-            self._publish_state("ERROR")
+            self._publish_result("fringe", output_dir, False, message=str(exc))
             if self._proc and self._proc.poll() is not None:
                  self._proc = None # Reset process if it crashed
         finally:
+            self.stereo_processor = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             self._pipeline_lock.release()
             self._publish_state("IDLE")
 
@@ -466,6 +501,7 @@ class ProcessPhase(Node):
             publisher.publish(msg)
         except Exception as exc:
             self.get_logger().error(f"Publish error ({encoding}): {exc}")
+            raise
 
     def _publish_debug_image(self, publisher, image_f32: np.ndarray, stamp, frame_id: str = "Active/left_camera_link") -> None:
         vis = self._norm_u8(image_f32)
