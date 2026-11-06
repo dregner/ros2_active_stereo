@@ -19,7 +19,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, SetBool
 from ros2_active_stereo_msgs.srv import ProcessFolder, MoveMotor  # type: ignore
-from fringe_process import FringeProcess   # type: ignore
+from fringe_process.fringe_process import FringeProcess   # type: ignore
 
 
 

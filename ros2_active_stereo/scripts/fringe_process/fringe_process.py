@@ -10,12 +10,12 @@ import matplotlib.pyplot as plt
 from typing import Optional, Union, Tuple
 
 # try:
-from fringe_pattern import FringePattern
-from gray_code import GrayCode
+from .fringe_pattern import FringePattern
+from .gray_code import GrayCode
 from pipeline_utils import graycode_bits
 # except (ImportError, ValueError):
-#     from fringe_pattern import FringePattern
-#     from gray_code import GrayCode
+#     from .fringe_pattern import FringePattern
+#     from .gray_code import GrayCode
 
 
 class FringeProcess(GrayCode, FringePattern):

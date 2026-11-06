@@ -33,8 +33,8 @@ from std_srvs.srv import Trigger
 from std_msgs.msg import String
 import message_filters
 from cv_bridge import CvBridge
-from fringe_process import FringeProcess   # type: ignore
-from projector import ProjectorControl     # type: ignore
+from fringe_process.fringe_process import FringeProcess   # type: ignore
+from fringe_process.projector import ProjectorControl     # type: ignore
 
 
 class ProcessPhase(Node):

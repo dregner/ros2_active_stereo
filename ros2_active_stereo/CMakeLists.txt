@@ -105,15 +105,31 @@ install(TARGETS
     )
 
 install(DIRECTORY include/
-      DESTINATION lib/${PROJECT_NAME}
+    DESTINATION lib/${PROJECT_NAME}
+    FILES_MATCHING PATTERN "*.hpp"
+)
 
+install(FILES
+    scripts/SpatialCorrelation_pytorch.py
+    scripts/InverseTriangulation.py
+    scripts/fringe_consistency.py
+    scripts/laser_surface.py
+    scripts/pipeline_utils.py
+    scripts/surface_filter.py
+    scripts/zscan_reconstruction.py
+    DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY scripts/fringe_process
+    DESTINATION lib/${PROJECT_NAME}
+    FILES_MATCHING PATTERN "*.py"
+    PATTERN "__pycache__" EXCLUDE
 )
 
 install(
     PROGRAMS
     scripts/triangulation_fringe_node.py
     scripts/triangulation_correl_node.py
-    scripts/SpatialCorrelation_pytorch.py
     scripts/phase_processing_node.py
     scripts/external_acquire_node.py
     DESTINATION lib/${PROJECT_NAME}
