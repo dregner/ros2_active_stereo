@@ -110,7 +110,7 @@ install(DIRECTORY include/
 )
 
 install(FILES
-    scripts/SpatialCorrelation_pytorch.py
+    scripts/SpatioCorrelation.py
     scripts/InverseTriangulation.py
     scripts/fringe_consistency.py
     scripts/laser_surface.py

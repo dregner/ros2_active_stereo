@@ -38,6 +38,11 @@ def generate_launch_description():
                 description='Number of images to acquire'
             ),
             DeclareLaunchArgument(
+                'matching_method',
+                default_value='census',
+                description='Matching score: census or correl (ZNCC)'
+            ),
+            DeclareLaunchArgument(
                 'window_size',
                 default_value='3',
                 description='Number of images to acquire'
@@ -77,6 +82,7 @@ def generate_launch_description():
                     {'num_images': LaunchConfiguration('n_images'),
                      'yaml_path': LaunchConfiguration('yaml_path'),
                      'window_size': LaunchConfiguration('window_size'),
+                     'matching_method': LaunchConfiguration('matching_method'),
                      'camera_frame_id': LaunchConfiguration('camera_frame_id'),
                      'threshold': LaunchConfiguration('correl_thresh'),
                      'std_thresh': LaunchConfiguration('std_thresh'),

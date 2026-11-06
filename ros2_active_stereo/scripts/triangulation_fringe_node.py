@@ -18,8 +18,8 @@ from geometry_msgs.msg import TransformStamped, PoseStamped, PoseWithCovarianceS
 from std_msgs.msg import Header
 import tf_transformations
 
-from SpatialCorrelation_pytorch import PyTorchStereoCorrel
-import torch
+from SpatioCorrelation import PyTorchStereoCorrel
+from zscan_reconstruction import reconstruct_fringe
 from pipeline_utils import ScanWorkerMixin, stamp_key
 
 class TriangulationNode(ScanWorkerMixin, Node):
@@ -40,6 +40,9 @@ class TriangulationNode(ScanWorkerMixin, Node):
         self.pointcloud_publisher = self.create_publisher(PointCloud2, 'pointcloud', 10)
 
         # Parameters
+        self.declare_parameter('max_block_voxels', 500000)
+        self.declare_parameter('fine_window', 4.0)
+        self.declare_parameter('seed_fill_radius', 12.0)
         self.declare_parameter('yaml_path', '/home/jetson/ros2_ws/src/ros2_active_stereo/params/lab_active.yaml')
         self.declare_parameter('mod_thresh', 30) #cupy 0.07. torch (0-255)
         self.declare_parameter('rad_thresh', 0.05) #threshold for radian difference
@@ -145,7 +148,7 @@ class TriangulationNode(ScanWorkerMixin, Node):
         # TORCH
         left_images = np.asarray([self.images['sync/left/phase_map'], self.images['sync/left/modulation_map']])
         right_images = np.asarray([self.images['sync/right/phase_map'], self.images['sync/right/modulation_map']])
-        self.zscan.convert_images(left_images, right_images, apply_clahe=False, undist=True)
+        self.zscan.convert_images(left_images, right_images, apply_clahe=False, undist=False)
         if self.pose_msg is not None:
             data = self.save_pose()
             np.savetxt(os.path.join(self.folder,'fringe', 'pose.txt'),data, fmt="%.6f", delimiter=", ")
@@ -154,82 +157,24 @@ class TriangulationNode(ScanWorkerMixin, Node):
         self.triangulation()
 
     def triangulation(self):
-        """
-            Function to perform spatial correlation
-        """
-        
-        self.get_logger().info("Starting triangulation process.")
-        t0 = time.time()
-        
-        # Get filter points parameters
-        mod_tresh = self.get_parameter('mod_thresh').get_parameter_value().integer_value
-        rad_thresh = self.get_parameter('rad_thresh').get_parameter_value().double_value
-        radius = self.get_parameter('radius').get_parameter_value().integer_value
-        min_neighbours = self.get_parameter('neighbours').get_parameter_value().integer_value
-        save_points = self.get_parameter('debug_save_points').get_parameter_value().bool_value
-        filename = self.get_parameter('save_filename').get_parameter_value().string_value
+        start = time.monotonic()
+        param = lambda name: self.get_parameter(name).value
+        self.zscan.max_block_voxels = param('max_block_voxels')
+        coarse, fine = reconstruct_fringe(
+            self.zscan, ((-200., 600.), (-200., 600.), (self.zmin, self.zmax)),
+            threshold=param('rad_thresh'), modulation=param('mod_thresh'),
+            radius=param('radius'), neighbors=param('neighbours'),
+            fine_window=param('fine_window'), seed_radius=param('seed_fill_radius'),
+            log=self.get_logger().info)
+        points = fine.cpu().numpy()
+        self.publish_pointcloud(points)
+        if param('debug_save_points'):
+            filename = time.strftime('%Y%m%d') + '_' + param('save_filename') + '.txt'
+            np.savetxt(os.path.join(self.folder, 'fringe', filename), points, fmt='%.6f')
+        self.get_logger().info(
+            f'Fringe reconstruction: {len(coarse)} coarse, {len(fine)} final points '
+            f'in {time.monotonic() - start:.2f} s')
 
-
-        GRID_LIMITS = {'x': (-200, 600), 'y': (-200, 600), 'z': (self.zmin, self.zmax)}
-        GRID_STEPS_1 = {'xy': 2.0, 'z': 1.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.25} # second steps of 3d patch
-        
-        self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
-
-        self.zscan.points3d(x_lim=GRID_LIMITS['x'], y_lim   =GRID_LIMITS['y'], z_lim=GRID_LIMITS['z'],
-                            xy_step=GRID_STEPS_1['xy'], z_step=GRID_STEPS_1['z'])
-                        
-        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=10, method='fringe')
-        # filter points based on difference value in radians
-        filter_mask = corr_gpu < rad_thresh
-        xyz_filtered_gpu = xyz_gpu[filter_mask]
-        corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
-        xyz_filtered_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
-
-        if xyz_filtered_gpu.numel() == 0:
-            self.get_logger().warning("No points found")
-            return
-        
-        self.publish_pointcloud(xyz_filtered_gpu.cpu().numpy())
-        
-        self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {xyz_filtered_gpu.shape[0]}')
-        t0 = time.time()
-        # self.publish_pointcloud(xyz_filtered_gpu.cpu().numpy())
-        
-        # Find first 3D bounds to refined process               
-        xlim = torch.min(xyz_filtered_gpu[:, 0]), torch.max(xyz_filtered_gpu[:, 0])
-        ylim = torch.min(xyz_filtered_gpu[:, 1]), torch.max(xyz_filtered_gpu[:, 1])
-        zlim = torch.min(xyz_filtered_gpu[:, 2]), torch.max(xyz_filtered_gpu[:, 2])
-
-        # self.get_logger().info(f'3D bounds for refined triangulation: X: {xlim}, Y: {ylim}, Z: {zlim}')
-        if zlim[0] == zlim[1]:
-            self.get_logger().info("Z are same")
-            zlim = (zlim[0] - 10, zlim[1] + 10)
-
-        # Construct second 3d points
-        self.zscan.points3d(x_lim=xlim, y_lim=ylim, z_lim=zlim, 
-                            xy_step=GRID_STEPS_2['xy'], z_step=GRID_STEPS_2['z'])
-                        
-        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=1, Ky=1, stride=1, Nz_block_voxels=60, method='fringe')
-
-        
-        filter_mask = corr_gpu < rad_thresh
-        xyz_filtered_gpu = xyz_gpu[filter_mask]
-        corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=mod_tresh, method='fringe')
-        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
-
-
-        # Publicar os pontos refinados
-        self.get_logger().info(f'2nd Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
-        self.publish_pointcloud(final_xyz_gpu.cpu().numpy())
-
-        if save_points:
-            # Salvar os pontos refinados em um arquivo .txt
-            np.savetxt(os.path.join(self.folder,'fringe','{}_{}.txt'.format(time.strftime("%Y%m%d"), filename)), final_xyz_gpu.cpu().numpy(), fmt='%.6f')
-
-   
     def publish_pointcloud(self, points):
         T_left = self.zscan.camera_params['left']['t'].cpu().numpy().T[0]  # Obter translação da câmera esquerda
         R_left = self.zscan.camera_params['left']['r'].cpu().numpy()

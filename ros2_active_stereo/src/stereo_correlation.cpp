@@ -9,22 +9,24 @@
 #include <opencv2/opencv.hpp>
 #include <filesystem>
 #include <cstdlib>
+#include <chrono>
+#include <mutex>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
-#include <message_filters/sync_policies/exact_time.h>
+#include <message_filters/sync_policies/approximate_time.h>
 
 /*
  * StereoCorrelProcess
  * -------------------
  * Manages the motor-scan + laser + camera trigger loop for spatial correlation.
  *
- * Image-loss fix
- * ~~~~~~~~~~~~~~
- * The BFS-U3-50S4M-C drops the first 1–2 frames after arming. Instead of
- * over-requesting images with a magic "+10" offset, we fire a configurable
- * number of "warmup" triggers first (default: 2) while service_request_ is
- * still false, then arm the save flag and fire exactly num_images_ triggers.
- * This gives a clean, deterministic acquisition count.
+ * Deterministic Acquisition:
+ * - Uses ApproximateTime synchronization (queue 50, 50ms tolerance) to prevent
+ *   frame loss from USB camera clock jitter.
+ * - Fires warmup triggers while the motor is stationary to wake up the camera sensor
+ *   without moving the baseline.
+ * - Arms image capture flag and executes exact num_images motor steps and triggers.
+ * - Saves images directly to RAM (/tmp/rrp_stereo/) and sends handshake upon completion.
  */
 
 namespace ros2_active_stereo
@@ -38,6 +40,8 @@ public:
         RCLCPP_INFO(this->get_logger(), "StereoCorrelProcess started");
 
         count_ = 0;
+        service_request_ = false;
+        perform_correl_  = false;
 
         // RAM directories for acquired images
         std::filesystem::create_directories("/tmp/rrp_stereo/left");
@@ -46,9 +50,6 @@ public:
         // Parameters
         this->declare_parameter<int>("num_images",      10);
         this->declare_parameter<int>("steps",           20);
-        // Number of warmup triggers fired before arming the save flag.
-        // The BFS camera typically drops 1-2 frames on first trigger after
-        // hardware-trigger arming; 2 is a safe default.
         this->declare_parameter<int>("warmup_triggers", 2);
 
         num_images_      = this->get_parameter("num_images").as_int();
@@ -59,50 +60,48 @@ public:
         handshake_images_pub_ =
             this->create_publisher<std_msgs::msg::Int16>("handshake_images", 10);
 
-        // Subscribers QoS
+        // Subscribers QoS with ample queue to prevent drops
         auto qos = rclcpp::SensorDataQoS();
-        qos.keep_last(15);
+        qos.keep_last(50);
         rclcpp::SubscriptionOptions sub_options;
 
         left_sub_.subscribe(this, "left/image",  qos.get_rmw_qos_profile(), sub_options);
         right_sub_.subscribe(this, "right/image", qos.get_rmw_qos_profile(), sub_options);
         sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(
-                    SyncPolicy(15), left_sub_, right_sub_);
+                    SyncPolicy(50), left_sub_, right_sub_);
         sync_->registerCallback(
             std::bind(&StereoCorrelProcess::images_cb, this,
                       std::placeholders::_1, std::placeholders::_2));
 
-        // Services / clients
-        service_request_ = false;
-        perform_correl_  = false;
-
+        // Callback groups
         cb_group_srv_    = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         cb_group_client_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
-        // auto srv_qos = rclcpp::ServicesQoS();
         srv_ = this->create_service<std_srvs::srv::SetBool>(
             "correlation_process",
             std::bind(&StereoCorrelProcess::get_images_srv, this,
-                      std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
+                      std::placeholders::_1, std::placeholders::_2),
+            rclcpp::ServicesQoS(), cb_group_srv_);
 
         save_im_srv_ = this->create_service<std_srvs::srv::Trigger>(
             "save_images_ssd",
             std::bind(&StereoCorrelProcess::save_images_ssd_srv, this,
-                      std::placeholders::_1, std::placeholders::_2), rmw_qos_profile_default);
+                      std::placeholders::_1, std::placeholders::_2),
+            rclcpp::ServicesQoS());
 
         gpio_client_ = this->create_client<std_srvs::srv::Trigger>(
-            "trigger", rmw_qos_profile_default, cb_group_client_);
+            "trigger", rclcpp::ServicesQoS(), cb_group_client_);
 
         laser_client_ = this->create_client<std_srvs::srv::SetBool>(
-            "laser", rmw_qos_profile_default, cb_group_client_);
+            "laser", rclcpp::ServicesQoS(), cb_group_client_);
 
         motor_client_ = this->create_client<ros2_active_stereo_msgs::srv::MoveMotor>(
-            "move_motor", rmw_qos_profile_default, cb_group_client_);
+            "move_motor", rclcpp::ServicesQoS(), cb_group_client_);
     }
 
 private:
 
-    using SyncPolicy = message_filters::sync_policies::ExactTime<
+    using SyncPolicy = message_filters::sync_policies::ApproximateTime<
         sensor_msgs::msg::Image, sensor_msgs::msg::Image>;
 
     // ── Attributes ────────────────────────────────────────────────────────
@@ -111,12 +110,13 @@ private:
     std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
     rclcpp::TimerBase::SharedPtr watchdog_timer_;
 
-    uint8_t  count_;
-    bool     service_request_;
-    bool     perform_correl_;
-    int      num_images_;
-    int      steps_;
-    int      warmup_triggers_;   // frames to discard before arming save
+    std::mutex state_mtx_;
+    uint8_t  count_{0};
+    bool     service_request_{false};
+    bool     perform_correl_{false};
+    int      num_images_{10};
+    int      steps_{20};
+    int      warmup_triggers_{2};
 
     rclcpp::CallbackGroup::SharedPtr cb_group_srv_;
     rclcpp::CallbackGroup::SharedPtr cb_group_client_;
@@ -137,8 +137,11 @@ private:
         msg.data = perform_correl_ ? count_to_send : -count_to_send;
         handshake_images_pub_->publish(msg);
 
-        service_request_ = false;
-        count_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_mtx_);
+            service_request_ = false;
+            count_ = 0;
+        }
 
         if (watchdog_timer_) {
             watchdog_timer_->cancel();
@@ -148,16 +151,23 @@ private:
 
     void watchdog_timeout_cb()
     {
+        int current_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_mtx_);
+            current_count = count_;
+        }
         RCLCPP_WARN(this->get_logger(),
-                    "Watchdog: timeout waiting for images. Saved %d / %d.",
-                    count_, num_images_);
-        send_handshake(count_);
+                    "Watchdog timeout: saved %d / %d images.",
+                    current_count, num_images_);
+        send_handshake(current_count);
     }
 
-    // Helper to send a single trigger and wait synchronously.
-    // Returns true on success.
     bool send_trigger_sync(std::chrono::milliseconds timeout = std::chrono::milliseconds(500))
     {
+        if (!gpio_client_->service_is_ready()) {
+            RCLCPP_ERROR(this->get_logger(), "Trigger service not ready!");
+            return false;
+        }
         auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
         auto fut = gpio_client_->async_send_request(req);
         if (fut.wait_for(timeout) != std::future_status::ready) {
@@ -175,6 +185,7 @@ private:
     void images_cb(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                    const sensor_msgs::msg::Image::ConstSharedPtr& right_msg)
     {
+        std::lock_guard<std::mutex> lock(state_mtx_);
         if (!service_request_) return;
 
         try {
@@ -182,7 +193,7 @@ private:
             cv::Mat right = cv_bridge::toCvShare(right_msg, "mono8")->image;
 
             if (left.empty() || right.empty()) {
-                RCLCPP_WARN(this->get_logger(), "Empty frame received");
+                RCLCPP_WARN(this->get_logger(), "Empty frame received in images_cb");
                 return;
             }
 
@@ -194,9 +205,9 @@ private:
             cv::imwrite(right_fn, right);
 
             count_++;
-            RCLCPP_DEBUG(this->get_logger(), "Saved pair %d / %d", count_, num_images_);
+            RCLCPP_INFO(this->get_logger(), "Saved pair %d / %d", count_, num_images_);
 
-            if (count_ == static_cast<uint8_t>(num_images_)) {
+            if (count_ >= static_cast<uint8_t>(num_images_)) {
                 RCLCPP_INFO(this->get_logger(),
                             "All %d image pairs saved successfully.", count_);
                 send_handshake(count_);
@@ -220,7 +231,7 @@ private:
             return;
         }
 
-        const std::string ram_path  = "/dev/shm/stereo_active/";
+        const std::string ram_path  = "/tmp/rrp_stereo/";
         const std::string dest_path = std::string(home) + "/Pictures/stereo_active_backup";
         RCLCPP_INFO(this->get_logger(), "Saving images to %s …", dest_path.c_str());
 
@@ -244,18 +255,19 @@ private:
         const std::shared_ptr<std_srvs::srv::SetBool::Request>  request,
         const std::shared_ptr<std_srvs::srv::SetBool::Response> response)
     {
-        // Re-read parameters in case they changed since construction
+        // Re-read parameters
         num_images_      = this->get_parameter("num_images").as_int();
         steps_           = this->get_parameter("steps").as_int();
         warmup_triggers_ = this->get_parameter("warmup_triggers").as_int();
 
-        count_          = 0;
-        service_request_ = false;   // will be armed after warmup
-        perform_correl_  = request->data;
+        {
+            std::lock_guard<std::mutex> lock(state_mtx_);
+            count_           = 0;
+            service_request_ = false;
+            perform_correl_  = request->data;
+        }
 
         const float angle_per_step = (steps_ / 2048.0f) * 360.0f;
-        // Total motor steps = warmup + real acquisitions
-        const int total_triggers = warmup_triggers_ + num_images_;
 
         // ── 1. Turn on laser ──────────────────────────────────────────────
         {
@@ -277,15 +289,35 @@ private:
             RCLCPP_INFO(this->get_logger(), "Laser ON");
         }
 
-        // ── 2. Scan loop ──────────────────────────────────────────────────
+        // ── 2. Warmup triggers (stationary, flushes initial sensor dropped frames)
+        if (warmup_triggers_ > 0) {
+            RCLCPP_INFO(this->get_logger(), "Firing %d warmup triggers...", warmup_triggers_);
+            for (int w = 0; w < warmup_triggers_; ++w) {
+                send_trigger_sync();
+                rclcpp::sleep_for(std::chrono::milliseconds(40));
+            }
+            // Allow any pending warmup frames to clear
+            rclcpp::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        // ── 3. Arm save flag ──────────────────────────────────────────────
+        {
+            std::lock_guard<std::mutex> lock(state_mtx_);
+            count_ = 0;
+            service_request_ = true;
+        }
+        RCLCPP_INFO(this->get_logger(), "Acquisition armed for %d images (angle step: %.2f°)",
+                    num_images_, angle_per_step);
+
+        // ── 4. Main scan loop ─────────────────────────────────────────────
         auto motor_req = std::make_shared<ros2_active_stereo_msgs::srv::MoveMotor::Request>();
         motor_req->angle = angle_per_step;
 
-        for (int i = 0; i < total_triggers; i++) {
+        for (int i = 0; i < num_images_; i++) {
 
             // Move motor one step
             auto fut_motor = motor_client_->async_send_request(motor_req);
-            if (fut_motor.wait_for(std::chrono::milliseconds(500)) != std::future_status::ready) {
+            if (fut_motor.wait_for(std::chrono::milliseconds(1000)) != std::future_status::ready) {
                 RCLCPP_ERROR(this->get_logger(), "Motor service timed out at step %d!", i);
                 response->success = false;
                 response->message = "Motor timeout";
@@ -298,12 +330,8 @@ private:
                 return;
             }
 
-            // Arm save flag after warmup triggers are done
-            if (i == warmup_triggers_ - 1) {
-                service_request_ = true;
-                RCLCPP_INFO(this->get_logger(),
-                            "Warmup done (%d triggers). Arming image save.", warmup_triggers_);
-            }
+            // Mechanical stabilization delay
+            rclcpp::sleep_for(std::chrono::milliseconds(20));
 
             // Send camera trigger
             if (!send_trigger_sync()) {
@@ -312,11 +340,11 @@ private:
                 return;
             }
 
-            // Small delay — camera exposure time + DMA transfer margin
-            rclcpp::sleep_for(std::chrono::milliseconds(10));
+            // Camera exposure + USB transfer margin
+            rclcpp::sleep_for(std::chrono::milliseconds(30));
         }
 
-        // ── 3. Turn off laser ─────────────────────────────────────────────
+        // ── 5. Turn off laser ─────────────────────────────────────────────
         {
             auto laser_req = std::make_shared<std_srvs::srv::SetBool::Request>();
             laser_req->data = false;
@@ -327,18 +355,12 @@ private:
                 response->message = "Laser OFF timeout";
                 return;
             }
-            if (!fut.get()->success) {
-                RCLCPP_WARN(this->get_logger(), "Laser OFF returned failure (non-fatal).");
-            }
             RCLCPP_INFO(this->get_logger(), "Laser OFF");
         }
 
-        // ── 4. Return motor to home ───────────────────────────────────────
+        // ── 6. Return motor to starting position ──────────────────────────
         {
-            // Total displacement = num_steps_moved * angle_per_step (positive)
-            // We moved total_triggers steps forward, so return is negative
-            const float return_angle =
-                -(static_cast<float>(total_triggers) * angle_per_step);
+            const float return_angle = -(static_cast<float>(num_images_) * angle_per_step);
             auto ret_req = std::make_shared<ros2_active_stereo_msgs::srv::MoveMotor::Request>();
             ret_req->angle = return_angle;
             RCLCPP_INFO(this->get_logger(), "Returning motor %.2f°", return_angle);
@@ -356,21 +378,22 @@ private:
                 response->message = "Motor return failed";
                 return;
             }
-            RCLCPP_INFO(this->get_logger(), "Motor returned to home.");
+            RCLCPP_INFO(this->get_logger(), "Motor returned to home position.");
         }
 
-        // ── 5. Start watchdog — fire only if images haven't arrived yet ───
-        if (service_request_) {
-            watchdog_timer_ = this->create_wall_timer(
-                std::chrono::milliseconds(2500),
-                std::bind(&StereoCorrelProcess::watchdog_timeout_cb, this),
-                cb_group_srv_);
+        // ── 7. Start watchdog for final image collection ──────────────────
+        {
+            std::lock_guard<std::mutex> lock(state_mtx_);
+            if (service_request_) {
+                watchdog_timer_ = this->create_wall_timer(
+                    std::chrono::milliseconds(3000),
+                    std::bind(&StereoCorrelProcess::watchdog_timeout_cb, this),
+                    cb_group_srv_);
+            }
         }
 
         response->success = true;
-        response->message = "Scan complete (" + std::to_string(total_triggers) +
-                            " triggers, " + std::to_string(warmup_triggers_) +
-                            " warmup, " + std::to_string(num_images_) + " saved)";
+        response->message = "Scan complete (" + std::to_string(num_images_) + " images requested)";
     }
 };
 

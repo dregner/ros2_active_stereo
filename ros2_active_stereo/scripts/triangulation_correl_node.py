@@ -5,10 +5,10 @@ import datetime
 import numpy as np
 import time
 import struct
-import torch
 from pipeline_utils import ScanWorkerMixin, validate_pairs
 
-from SpatialCorrelation_pytorch import PyTorchStereoCorrel as SpatialCorrelator
+from SpatioCorrelation import PyTorchStereoCorrel as SpatialCorrelator
+from zscan_reconstruction import reconstruct_laser
 
 import rclpy
 from rclpy.node import Node
@@ -34,6 +34,13 @@ class InverseTriangulationNode(ScanWorkerMixin, Node):
         self.get_logger().info('Inverse Correlation Node has been started.')
 
         # Parameters declaration
+        self.declare_parameter('max_block_voxels', 500000)
+        self.declare_parameter('reconstruct_laser', True)
+        self.declare_parameter('laser_blur', 3)
+        self.declare_parameter('surface_min_points', 32)
+        self.declare_parameter('depth_band_margin', 6.0)
+        self.declare_parameter('split_depth_tolerance', 1.0)
+        self.declare_parameter('refine_tile_size', 32.0)
         self.declare_parameter('yaml_path', '~/ros2_ws/src/stereo_active/config/SM3.yaml')
         self.declare_parameter('tile', 2)
         self.declare_parameter('climp', 8.0)
@@ -134,8 +141,12 @@ class InverseTriangulationNode(ScanWorkerMixin, Node):
                 right_images.append(img_r)
 
             t0 = time.time()
-            self.zscan.convert_images(left_imgs_cpu=left_images, right_imgs_cpu=right_images, apply_clahe=True, undist=True, tile=tile, climp=climp)
-            # self.triangulation()
+            blur = self.get_parameter('laser_blur').value
+            self.zscan.convert_images(left_images, right_images, apply_clahe=True, undist=False,
+                                      apply_blur=blur > 1, blur=blur, tile=tile, climp=climp)
+            del left_images, right_images
+            if self.get_parameter('reconstruct_laser').value:
+                self.triangulation()
             self.get_logger().info('Correlation process finished: {:.2f} s'.format(time.time()-t0))
             # Worker finally releases the buffers, including failed/empty scans.
             
@@ -146,85 +157,25 @@ class InverseTriangulationNode(ScanWorkerMixin, Node):
         return response
 
     def triangulation(self):
-        """
-            Function to perform spatial correlation
-        """
+        start = time.monotonic()
+        param = lambda name: self.get_parameter(name).value
+        self.zscan.max_block_voxels = param('max_block_voxels')
+        coarse, fine = reconstruct_laser(
+            self.zscan, ((-100., 600.), (-100., 600.), (self.zmin, self.zmax)),
+            kernel=param('window_size'), stride=param('stride'), threshold=param('threshold'),
+            texture=param('std_thresh'), crop=param('crop_image_factor'),
+            support_radius=param('radius'), min_points=param('surface_min_points'),
+            depth_margin=param('depth_band_margin'), split_tolerance=param('split_depth_tolerance'),
+            tile_size=param('refine_tile_size'), log=self.get_logger().info)
+        points = fine.cpu().numpy()
+        self.publish_pointcloud(points)
+        if param('debug_save_points'):
+            filename = time.strftime('%Y%m%d') + '_' + param('save_filename') + '.txt'
+            np.savetxt(os.path.join(self.folder, 'laser', filename), points, fmt='%.6f')
+        self.get_logger().info(
+            f'Laser reconstruction: {len(coarse)} coarse, {len(fine)} final points '
+            f'in {time.monotonic() - start:.2f} s')
 
-        self.get_logger().info("Starting triangulation process.")
-        t0 = time.time()
-        # Get filter points parameters
-        std_thresh = self.get_parameter('std_thresh').get_parameter_value().integer_value
-        correl_thresh = self.get_parameter('threshold').get_parameter_value().double_value
-        win_size = self.get_parameter('window_size').get_parameter_value().integer_value
-        stride = self.get_parameter('stride').get_parameter_value().integer_value
-
-        radius = self.get_parameter('radius').get_parameter_value().integer_value
-        min_neighbours = self.get_parameter('neighbours').get_parameter_value().integer_value
-        save_points = self.get_parameter('debug_save_points').get_parameter_value().bool_value
-        filename = self.get_parameter('save_filename').get_parameter_value().string_value
-        crop_factor = self.get_parameter('crop_image_factor').get_parameter_value().double_value
-
-        self.get_logger().info(f'Threshold: {correl_thresh*100} %, Win: {win_size}x{win_size}x{self.num_images}')
-
-        GRID_LIMITS = {'x': (-100, 600), 'y': (-100, 600), 'z': (self.zmin, self.zmax)}
-        GRID_STEPS_1 = {'xy': 2.0, 'z': 2.0} # first steps of 3d patch
-        GRID_STEPS_2 = {'xy': 1.0, 'z': 0.1} # second steps of 3d patch
-        # GRID_STEPS_3= {'xy': 1.0, 'z': 0.01} # second steps of 3d patch
-
-        self.get_logger().info(f'Z range for correlation: ({self.zmin:.2f}, {self.zmax:.2f})')
-
-        self.zscan.points3d(x_lim=GRID_LIMITS['x'], y_lim=GRID_LIMITS['y'], z_lim=GRID_LIMITS['z'],
-                            xy_step=GRID_STEPS_1['xy'], z_step=GRID_STEPS_1['z'])
-                        
-        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=win_size, Ky=win_size, stride=stride, Nz_block_voxels=10, method='correl')
-
-        # filter points based on difference value in radians
-        filter_mask = corr_gpu > correl_thresh
-        xyz_filtered_gpu = xyz_gpu[filter_mask]
-        corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.mask_uv_points(xyz_filtered_gpu, corr_filtered_gpu, crop_factor=crop_factor)
-        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=std_thresh, method='correl')
-        # clean points based on neighbours
-        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours, radius=radius)
-        
-        if final_xyz_gpu.numel() == 0:
-            self.get_logger().warning("No points found")
-            return
-
-        self.get_logger().info(f'1st Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
-        self.publish_pointcloud(final_xyz_gpu.cpu().numpy())
-        # Find first 3D bounds to refined process               
-        xlim = torch.min(final_xyz_gpu[:, 0]), torch.max(final_xyz_gpu[:, 0])
-        ylim = torch.min(final_xyz_gpu[:, 1]), torch.max(final_xyz_gpu[:, 1])
-        zlim = torch.min(final_xyz_gpu[:, 2]), torch.max(final_xyz_gpu[:, 2])
-
-        if zlim[0] == zlim[1]:
-            self.get_logger().info("Z are same")
-            zlim = (zlim[0] - 5, zlim[1] + 5)
-
-        # Construct second 3d points
-        self.zscan.points3d(x_lim=xlim, y_lim=ylim, z_lim=zlim, 
-                            xy_step=GRID_STEPS_2['xy'], z_step=GRID_STEPS_2['z'])
-                        
-        xyz_gpu, corr_gpu, _ = self.zscan.process_segmented_z(Kx=win_size, Ky=win_size, stride=stride, Nz_block_voxels=5, method='correl') 
-
-        
-        filter_mask = corr_gpu > correl_thresh
-        xyz_filtered_gpu = xyz_gpu[filter_mask]
-        corr_filtered_gpu = corr_gpu[filter_mask]
-        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.mask_uv_points(xyz_filtered_gpu, corr_filtered_gpu, crop_factor=crop_factor)
-        xyz_filtered_gpu, corr_filtered_gpu, _ = self.zscan.std_mask_points(xyz_filtered_gpu, corr_filtered_gpu, bounds=std_thresh, method='correl')
-        final_xyz_gpu, _,_ = self.zscan.euclidean_filter(xyz_gpu=xyz_filtered_gpu, corr_gpu=corr_filtered_gpu, min_neighbors=min_neighbours*2, radius=radius/2)
-
-        self.get_logger().info(f'2nd Triangulation completed in {time.time() - t0:.2f} seconds. Total points: {final_xyz_gpu.shape[0]}')
-        self.publish_pointcloud(final_xyz_gpu.cpu().numpy())
-
-
-        if save_points:
-            np.savetxt('{}_{}.txt'.format(time.strftime("%Y%m%d"), filename), final_xyz_gpu.cpu().numpy(), fmt='%.6f')
-        
-        del xyz_gpu, corr_gpu, xyz_filtered_gpu, corr_filtered_gpu, final_xyz_gpu # limpando memoria
-            
     def z_limits_global(self, points):
         if self.process_data:
             return
@@ -263,7 +214,7 @@ class InverseTriangulationNode(ScanWorkerMixin, Node):
         self.transformed_xyz_cam = transformed_ph[:, :3] * 1000  # Convert from meters to millimeters
 
         # transformar os pontos para peça
-        self.transformed_xyz = ((R_left.T @ self.transformed_xyz_cam.T) - T_left[:, None]).T
+        self.transformed_xyz = (R_left.T @ (self.transformed_xyz_cam.T - T_left[:, None])).T
 
         xmin, xmax = -100, 500
         ymin, ymax = -100, 400
